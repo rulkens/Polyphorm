@@ -47,7 +47,7 @@ add_executable(polyphorm
   # cpplib/memory.cpp         # enabled in M2
   # cpplib/random.cpp         # enabled in M2
   # cpplib/logging.cpp        # enabled in M2
-  # cpplib/file_system.cpp    # enabled in M2
+  cpplib/file_system.cpp
   cpplib/gpu/gpu_context.cpp
 )
 target_include_directories(polyphorm PRIVATE cpplib)
@@ -63,3 +63,10 @@ add_executable(cpplib_tests
 target_include_directories(cpplib_tests PRIVATE cpplib)
 target_link_libraries(cpplib_tests PRIVATE glfw)
 add_test(NAME cpplib_tests COMMAND cpplib_tests)
+
+add_executable(file_system_tests
+  tests/file_system_tests.cpp
+  cpplib/file_system.cpp
+)
+target_compile_features(file_system_tests PRIVATE cxx_std_17)
+add_test(NAME file_system_tests COMMAND file_system_tests)
