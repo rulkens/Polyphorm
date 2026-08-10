@@ -48,7 +48,7 @@ add_executable(polyphorm
   # cpplib/random.cpp         # uncommented in Task 3/4
   # cpplib/logging.cpp        # uncommented in Task 3/4
   # cpplib/file_system.cpp    # uncommented in Task 3/4
-  # cpplib/gpu/gpu_context.cpp # uncommented in Task 3/4
+  cpplib/gpu/gpu_context.cpp
 )
 target_include_directories(polyphorm PRIVATE cpplib)
 target_link_libraries(polyphorm PRIVATE webgpu_dawn webgpu_glfw glfw)
