@@ -1,7 +1,7 @@
 #pragma once
 #include "graphics.h"
 #include "file_system.h"
-#include "resources.h"
+#include <stdint.h>
 
 struct StackAllocator;
 
@@ -12,6 +12,24 @@ struct MeshData
 	uint32_t index_count;
 	uint32_t vertex_count;
 	uint32_t vertex_stride;
+};
+
+typedef uint32_t sid;
+
+struct AssetInfo
+{
+	char *path;
+	uint32_t type;
+};
+
+const uint32_t ASSET_MAX_PATH_LENGTH = 50;
+const uint32_t ASSET_MAX_NAME_LENGTH = 50;
+
+struct AssetDatabase
+{
+	uint32_t asset_count;
+	sid *keys;
+	AssetInfo *asset_infos;
 };
 
 namespace parsers
