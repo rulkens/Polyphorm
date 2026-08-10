@@ -1,6 +1,7 @@
 #include "gpu/gpu_context.h"
 #include "platform.h"
 #include <webgpu/webgpu_glfw.h>
+#include <GLFW/glfw3.h>
 #include <cstdio>
 #include <cstdlib>
 
@@ -71,8 +72,13 @@ GpuContext init(Window *window) {
 
     ctx.surface = wgpu::glfw::CreateSurfaceForWindow(ctx.instance, window->window_handle);
     if (!ctx.surface) fatal("CreateSurfaceForWindow failed");
-    ctx.width = window->window_width;
-    ctx.height = window->window_height;
+    // Use the framebuffer size, not the logical window size: on Retina
+    // displays the framebuffer is 2x logical, and configuring the surface
+    // at the logical size leaves the swapchain at half resolution.
+    int fb_w, fb_h;
+    glfwGetFramebufferSize(window->window_handle, &fb_w, &fb_h);
+    ctx.width = fb_w;
+    ctx.height = fb_h;
 
     wgpu::SurfaceConfiguration config = {};
     config.device = ctx.device;

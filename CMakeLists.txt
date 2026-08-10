@@ -44,10 +44,10 @@ add_executable(polyphorm
   cpplib/platform.cpp
   cpplib/input.cpp
   cpplib/maths.cpp
-  # cpplib/memory.cpp         # uncommented in Task 3/4
-  # cpplib/random.cpp         # uncommented in Task 3/4
-  # cpplib/logging.cpp        # uncommented in Task 3/4
-  # cpplib/file_system.cpp    # uncommented in Task 3/4
+  # cpplib/memory.cpp         # enabled in M2
+  # cpplib/random.cpp         # enabled in M2
+  # cpplib/logging.cpp        # enabled in M2
+  # cpplib/file_system.cpp    # enabled in M2
   cpplib/gpu/gpu_context.cpp
 )
 target_include_directories(polyphorm PRIVATE cpplib)
