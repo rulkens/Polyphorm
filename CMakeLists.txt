@@ -41,9 +41,9 @@ FetchContent_MakeAvailable(dawn)
 
 add_executable(polyphorm
   main_m1.cpp
-  # cpplib/platform.cpp       # uncommented in Task 3/4
-  # cpplib/input.cpp          # uncommented in Task 3/4
-  # cpplib/maths.cpp          # uncommented in Task 3/4
+  cpplib/platform.cpp
+  cpplib/input.cpp
+  cpplib/maths.cpp
   # cpplib/memory.cpp         # uncommented in Task 3/4
   # cpplib/random.cpp         # uncommented in Task 3/4
   # cpplib/logging.cpp        # uncommented in Task 3/4
@@ -52,3 +52,14 @@ add_executable(polyphorm
 )
 target_include_directories(polyphorm PRIVATE cpplib)
 target_link_libraries(polyphorm PRIVATE webgpu_dawn webgpu_glfw glfw)
+
+enable_testing()
+add_executable(cpplib_tests
+  tests/platform_input_tests.cpp
+  cpplib/platform.cpp
+  cpplib/input.cpp
+  cpplib/maths.cpp
+)
+target_include_directories(cpplib_tests PRIVATE cpplib)
+target_link_libraries(cpplib_tests PRIVATE glfw)
+add_test(NAME cpplib_tests COMMAND cpplib_tests)

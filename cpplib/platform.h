@@ -1,13 +1,13 @@
 #pragma once
-#include <Windows.h>
+struct GLFWwindow;
 #include <stdint.h>
 
-#define IS_WINDOW_VALID(window) (!(window.window_handle == INVALID_HANDLE_VALUE))
+#define IS_WINDOW_VALID(window) ((window).window_handle != nullptr)
 
 // Represents current window
 struct Window
 {
-	HWND window_handle;
+	GLFWwindow *window_handle;
 	uint32_t window_width;
 	uint32_t window_height;
 };
@@ -97,7 +97,7 @@ struct Event
 };
 
 // Ticks represent CPU ticks
-typedef LARGE_INTEGER Ticks;
+typedef uint64_t Ticks;  // nanoseconds; frequency fixed at 1e9
 
 // `platform` namespace handles interfacing with windows API, with the exception of file system interface
 namespace platform
