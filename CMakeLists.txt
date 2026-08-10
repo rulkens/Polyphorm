@@ -49,6 +49,7 @@ add_executable(polyphorm
   # cpplib/logging.cpp        # enabled in M2
   cpplib/file_system.cpp
   cpplib/gpu/gpu_context.cpp
+  cpplib/graphics.cpp
 )
 target_include_directories(polyphorm PRIVATE cpplib)
 target_link_libraries(polyphorm PRIVATE webgpu_dawn webgpu_glfw glfw)
