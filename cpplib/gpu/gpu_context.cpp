@@ -121,6 +121,7 @@ bool init_surface(GpuContext *ctx, Window *window) {
     ctx->width = fb_w;
     ctx->height = fb_h;
 
+    static wgpu::TextureFormat srgb = wgpu::TextureFormat::BGRA8UnormSrgb;
     wgpu::SurfaceConfiguration config = {};
     config.device = ctx->device;
     config.format = ctx->surface_format;
@@ -128,6 +129,8 @@ bool init_surface(GpuContext *ctx, Window *window) {
     config.width = ctx->width;
     config.height = ctx->height;
     config.presentMode = wgpu::PresentMode::Fifo;  // = the original's Present(1,0) vsync
+    config.viewFormatCount = 1;
+    config.viewFormats = &srgb;
     ctx->surface.Configure(&config);
     return true;
 }
