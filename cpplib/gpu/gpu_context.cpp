@@ -12,10 +12,9 @@ static void fatal(const char *what) {
     std::abort();
 }
 
-GpuContext init(Window *window) {
-    GpuContext ctx;
-    ctx.instance = wgpu::CreateInstance(nullptr);
-    if (!ctx.instance) fatal("wgpu::CreateInstance failed");
+bool init_device(GpuContext *ctx) {
+    ctx->instance = wgpu::CreateInstance(nullptr);
+    if (!ctx->instance) fatal("wgpu::CreateInstance failed");
 
     // Synchronous adapter/device acquisition: Dawn's async requests are
     // pumped to completion with ProcessEvents. The names of the callback
@@ -26,26 +25,51 @@ GpuContext init(Window *window) {
     wgpu::RequestAdapterOptions adapter_opts = {};
     adapter_opts.powerPreference = wgpu::PowerPreference::HighPerformance;
     bool done = false;
-    ctx.instance.RequestAdapter(
+    ctx->instance.RequestAdapter(
         &adapter_opts, wgpu::CallbackMode::AllowProcessEvents,
         [&](wgpu::RequestAdapterStatus status, wgpu::Adapter adapter, wgpu::StringView msg) {
             if (status != wgpu::RequestAdapterStatus::Success)
                 fatal("RequestAdapter failed");
-            ctx.adapter = adapter;
+            ctx->adapter = adapter;
             done = true;
         });
-    while (!done) ctx.instance.ProcessEvents();
+    while (!done) ctx->instance.ProcessEvents();
 
     // float32-filterable is required by the volume renderer (spec: GPU
     // resource mapping — trace is r32float and sampled with a linear
     // sampler). Fail HERE, with the feature's name, not later.
-    if (!ctx.adapter.HasFeature(wgpu::FeatureName::Float32Filterable))
+    if (!ctx->adapter.HasFeature(wgpu::FeatureName::Float32Filterable))
         fatal("adapter lacks required feature: float32-filterable");
 
-    wgpu::FeatureName required[] = { wgpu::FeatureName::Float32Filterable };
+    // Adapter-supported limits: request what the sim needs, degrade where allowed.
+    wgpu::Limits supported = {};
+    ctx->adapter.GetLimits(&supported);
+
+    wgpu::Limits required = {};   // zero-init: fields we don't set stay at spec defaults
+    // Compute workgroup: shaders prefer their original 1000/512-invocation
+    // shapes; they can reshape via override constants if the adapter grants
+    // less, so request the adapter's own maximum rather than gating hard.
+    required.maxComputeInvocationsPerWorkgroup = supported.maxComputeInvocationsPerWorkgroup;
+    required.maxComputeWorkgroupSizeX = supported.maxComputeWorkgroupSizeX;
+    required.maxComputeWorkgroupSizeY = supported.maxComputeWorkgroupSizeY;
+    required.maxComputeWorkgroupSizeZ = supported.maxComputeWorkgroupSizeZ;
+    // Storage/readback: VAC-scale grids need multi-GB buffers (M5 export
+    // readback of a 712x1200x728 r32float trace is ~2.5 GB).
+    required.maxBufferSize = supported.maxBufferSize;
+    required.maxStorageBufferBindingSize = supported.maxStorageBufferBindingSize;
+    required.maxTextureDimension3D = supported.maxTextureDimension3D;
+
+    // Hard floors: below these the sim cannot run at all; fatal NAMES the limit.
+    if (supported.maxComputeInvocationsPerWorkgroup < 256)
+        fatal("adapter limit too low: maxComputeInvocationsPerWorkgroup < 256");
+    if (supported.maxTextureDimension3D < 1024)
+        fatal("adapter limit too low: maxTextureDimension3D < 1024 (grid resolution)");
+
+    wgpu::FeatureName required_features[] = { wgpu::FeatureName::Float32Filterable };
     wgpu::DeviceDescriptor dev_desc = {};
-    dev_desc.requiredFeatures = required;
+    dev_desc.requiredFeatures = required_features;
     dev_desc.requiredFeatureCount = 1;
+    dev_desc.requiredLimits = &required;
     dev_desc.SetUncapturedErrorCallback(
         [](const wgpu::Device &, wgpu::ErrorType type, wgpu::StringView msg) {
             std::fprintf(stderr, "[gpu] uncaptured error (%d): %.*s\n",
@@ -59,35 +83,59 @@ GpuContext init(Window *window) {
         });
 
     done = false;
-    ctx.adapter.RequestDevice(
+    ctx->adapter.RequestDevice(
         &dev_desc, wgpu::CallbackMode::AllowProcessEvents,
         [&](wgpu::RequestDeviceStatus status, wgpu::Device device, wgpu::StringView msg) {
             if (status != wgpu::RequestDeviceStatus::Success)
                 fatal("RequestDevice failed");
-            ctx.device = device;
+            ctx->device = device;
             done = true;
         });
-    while (!done) ctx.instance.ProcessEvents();
-    ctx.queue = ctx.device.GetQueue();
+    while (!done) ctx->instance.ProcessEvents();
+    ctx->queue = ctx->device.GetQueue();
 
-    ctx.surface = wgpu::glfw::CreateSurfaceForWindow(ctx.instance, window->window_handle);
-    if (!ctx.surface) fatal("CreateSurfaceForWindow failed");
+    // Store granted limit values for Task 3 and later tasks
+    wgpu::Limits granted = {};
+    ctx->device.GetLimits(&granted);
+    ctx->max_workgroup_invocations = granted.maxComputeInvocationsPerWorkgroup;
+    ctx->max_storage_buffer_binding_size = granted.maxStorageBufferBindingSize;
+    ctx->max_buffer_size = granted.maxBufferSize;
+
+    // Log granted limits for debugging and Task 2b planning
+    std::fprintf(stderr, "[gpu] limits: workgroup_invocations=%u storage_binding=%llu MiB buffer=%llu MiB\n",
+            ctx->max_workgroup_invocations,
+            (unsigned long long)(ctx->max_storage_buffer_binding_size >> 20),
+            (unsigned long long)(ctx->max_buffer_size >> 20));
+
+    return true;
+}
+
+bool init_surface(GpuContext *ctx, Window *window) {
+    ctx->surface = wgpu::glfw::CreateSurfaceForWindow(ctx->instance, window->window_handle);
+    if (!ctx->surface) fatal("CreateSurfaceForWindow failed");
     // Use the framebuffer size, not the logical window size: on Retina
     // displays the framebuffer is 2x logical, and configuring the surface
     // at the logical size leaves the swapchain at half resolution.
     int fb_w, fb_h;
     glfwGetFramebufferSize(window->window_handle, &fb_w, &fb_h);
-    ctx.width = fb_w;
-    ctx.height = fb_h;
+    ctx->width = fb_w;
+    ctx->height = fb_h;
 
     wgpu::SurfaceConfiguration config = {};
-    config.device = ctx.device;
-    config.format = ctx.surface_format;
+    config.device = ctx->device;
+    config.format = ctx->surface_format;
     config.usage = wgpu::TextureUsage::RenderAttachment;
-    config.width = ctx.width;
-    config.height = ctx.height;
+    config.width = ctx->width;
+    config.height = ctx->height;
     config.presentMode = wgpu::PresentMode::Fifo;  // = the original's Present(1,0) vsync
-    ctx.surface.Configure(&config);
+    ctx->surface.Configure(&config);
+    return true;
+}
+
+GpuContext init(Window *window) {
+    GpuContext ctx;
+    init_device(&ctx);
+    init_surface(&ctx, window);
     return ctx;
 }
 
