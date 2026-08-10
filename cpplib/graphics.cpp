@@ -135,18 +135,159 @@ void release() {
 
 // ---- M2a Task 4/5/6 implement these ----
 
-DepthBuffer get_depth_buffer(uint32_t width, uint32_t height) {
-    return {};
+static wgpu::TextureFormat to_wgpu(Format f) {
+    switch (f) {
+        case Format::R32_FLOAT:        return wgpu::TextureFormat::R32Float;
+        case Format::RGBA32_FLOAT:     return wgpu::TextureFormat::RGBA32Float;
+        case Format::R32_UINT:         return wgpu::TextureFormat::R32Uint;
+        case Format::RGBA8_UNORM:      return wgpu::TextureFormat::RGBA8Unorm;
+        case Format::RGBA8_UNORM_SRGB: return wgpu::TextureFormat::RGBA8UnormSrgb;
+        default:                       return wgpu::TextureFormat::Undefined;
+    }
+}
+
+static uint32_t bytes_per_pixel(Format f) {
+    switch (f) {
+        case Format::R32_FLOAT: case Format::R32_UINT: return 4;
+        case Format::RGBA32_FLOAT: return 16;
+        case Format::RGBA8_UNORM: case Format::RGBA8_UNORM_SRGB: return 4;
+        default: return 0;
+    }
+}
+
+ConstantBuffer get_constant_buffer(uint32_t size) {
+    ConstantBuffer cb = {};
+    wgpu::BufferDescriptor desc = {};
+    desc.size = (size + 15u) & ~15u;   // round to 16: uniform binding size floor
+    desc.usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst;
+    cb.buffer = g_ctx.device.CreateBuffer(&desc);
+    cb.size = size;
+    return cb;
+}
+
+void update_constant_buffer(ConstantBuffer *buffer, void *data) {
+    // Whole-buffer overwrite, like the D3D11 Map(WRITE_DISCARD)+memcpy.
+    g_ctx.queue.WriteBuffer(buffer->buffer, 0, data, buffer->size);
+}
+
+void set_constant_buffer(ConstantBuffer *buffer, uint32_t slot) {
+    // The original bound to all 4 stages at `slot`; main.cpp only ever uses
+    // slot 0 (inventory §1). Fork contract: slot 0 == @group(0) @binding(0).
+    assert(slot == 0 && "fork supports constant buffer slot 0 only");
+    g_uniform_buffer = buffer->buffer;
+    g_uniform_size = (buffer->size + 15u) & ~15u;
+}
+
+StructuredBuffer get_structured_buffer(int element_stride, int num_elements) {
+    StructuredBuffer sb = {};
+    wgpu::BufferDescriptor desc = {};
+    desc.size = (uint64_t)element_stride * (uint64_t)num_elements;
+    desc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst |
+                 wgpu::BufferUsage::CopySrc;   // CopySrc: readback path
+    sb.buffer = g_ctx.device.CreateBuffer(&desc);
+    sb.element_stride = (uint32_t)element_stride;
+    sb.num_elements = (uint32_t)num_elements;
+    sb.size = (uint32_t)desc.size;
+    return sb;
+}
+
+void update_structured_buffer(StructuredBuffer *buffer, void *data) {
+    g_ctx.queue.WriteBuffer(buffer->buffer, 0, data, buffer->size);
+}
+
+static wgpu::Texture make_texture(wgpu::TextureDimension dim, uint32_t w, uint32_t h,
+                                  uint32_t d, Format format) {
+    wgpu::TextureDescriptor desc = {};
+    desc.dimension = dim;
+    desc.size = {w, h, d};
+    desc.format = to_wgpu(format);
+    desc.mipLevelCount = 1;
+    desc.usage = wgpu::TextureUsage::TextureBinding |     // sampled (sr_view)
+                 wgpu::TextureUsage::StorageBinding |     // storage (ua_view)
+                 wgpu::TextureUsage::CopySrc |            // export/readback
+                 wgpu::TextureUsage::CopyDst;             // initial-data upload
+    return g_ctx.device.CreateTexture(&desc);
 }
 
 Texture2D get_texture2D(void *data, uint32_t width, uint32_t height, Format format,
                         uint32_t pixel_byte_count) {
-    return {};
+    (void)pixel_byte_count; // format determines the real size
+    Texture2D t = {};
+    t.texture = make_texture(wgpu::TextureDimension::e2D, width, height, 1, format);
+    t.sr_view = t.texture.CreateView();
+    t.ua_view = t.texture.CreateView();
+    t.width = width; t.height = height; t.format = format;
+    if (data) {
+        wgpu::TexelCopyTextureInfo dst = {};
+        dst.texture = t.texture;
+        wgpu::TexelCopyBufferLayout layout = {};
+        layout.bytesPerRow = width * bytes_per_pixel(format);
+        layout.rowsPerImage = height;
+        wgpu::Extent3D extent = {width, height, 1};
+        g_ctx.queue.WriteTexture(&dst, data, (uint64_t)layout.bytesPerRow * height,
+                                 &layout, &extent);
+    }
+    return t;
 }
 
 Texture3D get_texture3D(void *data, uint32_t width, uint32_t height, uint32_t depth,
                         Format format, uint32_t pixel_byte_count) {
-    return {};
+    (void)pixel_byte_count;
+    Texture3D t = {};
+    t.texture = make_texture(wgpu::TextureDimension::e3D, width, height, depth, format);
+    t.sr_view = t.texture.CreateView();
+    t.ua_view = t.texture.CreateView();
+    t.width = width; t.height = height; t.depth = depth; t.format = format;
+    if (data) {
+        wgpu::TexelCopyTextureInfo dst = {};
+        dst.texture = t.texture;
+        wgpu::TexelCopyBufferLayout layout = {};
+        layout.bytesPerRow = width * bytes_per_pixel(format);
+        layout.rowsPerImage = height;
+        wgpu::Extent3D extent = {width, height, depth};
+        g_ctx.queue.WriteTexture(&dst, data,
+                                 (uint64_t)layout.bytesPerRow * height * depth,
+                                 &layout, &extent);
+    }
+    // NOTE the original leaves data==NULL textures uninitialized; WebGPU
+    // zero-initializes. That is a (beneficial) difference: the original relied
+    // on main.cpp clearing before use anyway (inventory §2). Nothing to do.
+    return t;
+}
+
+DepthBuffer get_depth_buffer(uint32_t width, uint32_t height) {
+    // Created by main.cpp but never bound (inventory §4) — real texture, inert.
+    DepthBuffer db = {};
+    wgpu::TextureDescriptor desc = {};
+    desc.size = {width, height, 1};
+    desc.format = wgpu::TextureFormat::Depth24PlusStencil8;
+    desc.usage = wgpu::TextureUsage::RenderAttachment;
+    db.texture = g_ctx.device.CreateTexture(&desc);
+    db.ds_view = db.texture.CreateView();
+    db.width = width; db.height = height;
+    return db;
+}
+
+TextureSampler get_texture_sampler(SampleMode mode, Filter filter) {
+    TextureSampler s = {};
+    wgpu::SamplerDescriptor desc = {};
+    wgpu::AddressMode am = mode == WRAP ? wgpu::AddressMode::Repeat
+                        : wgpu::AddressMode::ClampToEdge; // BORDER: WebGPU has no
+    // border color sampler in core; CLAMP is the closest. main.cpp only uses
+    // CLAMP (inventory §1), so this is unreachable-in-practice.
+    desc.addressModeU = am; desc.addressModeV = am; desc.addressModeW = am;
+    if (filter == Filter::POINT) {
+        desc.magFilter = wgpu::FilterMode::Nearest;
+        desc.minFilter = wgpu::FilterMode::Nearest;
+        desc.mipmapFilter = wgpu::MipmapFilterMode::Nearest;
+    } else {
+        desc.magFilter = wgpu::FilterMode::Linear;
+        desc.minFilter = wgpu::FilterMode::Linear;
+        desc.mipmapFilter = wgpu::MipmapFilterMode::Linear;
+        if (filter == Filter::ANISOTROPIC) desc.maxAnisotropy = 16;
+    }
+    s.sampler = g_ctx.device.CreateSampler(&desc);
+    return s;
 }
 
 Texture2D load_texture2D(std::string filename) {
@@ -163,13 +304,109 @@ uint32_t capture_current_frame() {
     return 0;
 }
 
+static const char *CLEAR_TEX3D_WGSL = R"(
+@group(0) @binding(0) var<uniform> clear_value : vec4<f32>;
+@group(1) @binding(0) var target : texture_storage_3d<r32float, write>;
+@compute @workgroup_size(4, 4, 4)
+fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let dims = textureDimensions(target);
+    if (gid.x >= dims.x || gid.y >= dims.y || gid.z >= dims.z) { return; }
+    textureStore(target, gid, clear_value);
+}
+)";
+
+static const char *CLEAR_TEX2D_F_WGSL = R"(
+@group(0) @binding(0) var<uniform> clear_value : vec4<f32>;
+@group(1) @binding(0) var target : texture_storage_2d<rgba32float, write>;
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let dims = textureDimensions(target);
+    if (gid.x >= dims.x || gid.y >= dims.y) { return; }
+    textureStore(target, gid.xy, clear_value);
+}
+)";
+
+static const char *CLEAR_TEX2D_U_WGSL = R"(
+@group(0) @binding(0) var<uniform> clear_value : vec4<u32>;
+@group(1) @binding(0) var target : texture_storage_2d<r32uint, write>;
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let dims = textureDimensions(target);
+    if (gid.x >= dims.x || gid.y >= dims.y) { return; }
+    textureStore(target, gid.xy, clear_value);
+}
+)";
+
+// One lazily-built pipeline + scratch uniform per clear kernel.
+struct ClearKernel {
+    wgpu::ComputePipeline pipeline;
+    wgpu::Buffer uniform;   // 16 bytes
+};
+static ClearKernel g_clear3d, g_clear2d_f, g_clear2d_u;
+
+static void ensure_clear_kernel(ClearKernel *k, const char *wgsl) {
+    if (k->pipeline) return;
+    wgpu::ShaderSourceWGSL src = {};
+    src.code = wgsl;
+    wgpu::ShaderModuleDescriptor mod_desc = {};
+    mod_desc.nextInChain = &src;
+    wgpu::ShaderModule module = g_ctx.device.CreateShaderModule(&mod_desc);
+    wgpu::ComputePipelineDescriptor desc = {};
+    desc.compute.module = module;
+    k->pipeline = g_ctx.device.CreateComputePipeline(&desc);
+    wgpu::BufferDescriptor bdesc = {};
+    bdesc.size = 16;
+    bdesc.usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst;
+    k->uniform = g_ctx.device.CreateBuffer(&bdesc);
+}
+
+static void run_clear(ClearKernel *k, wgpu::TextureView view, const void *value16,
+                      uint32_t gx, uint32_t gy, uint32_t gz) {
+    g_ctx.queue.WriteBuffer(k->uniform, 0, value16, 16);
+    wgpu::BindGroupEntry e0 = {};
+    e0.binding = 0; e0.buffer = k->uniform; e0.size = 16;
+    wgpu::BindGroupDescriptor g0 = {};
+    g0.layout = k->pipeline.GetBindGroupLayout(0);
+    g0.entryCount = 1; g0.entries = &e0;
+    wgpu::BindGroup group0 = g_ctx.device.CreateBindGroup(&g0);
+    wgpu::BindGroupEntry e1 = {};
+    e1.binding = 0; e1.textureView = view;
+    wgpu::BindGroupDescriptor g1 = {};
+    g1.layout = k->pipeline.GetBindGroupLayout(1);
+    g1.entryCount = 1; g1.entries = &e1;
+    wgpu::BindGroup group1 = g_ctx.device.CreateBindGroup(&g1);
+
+    ensure_encoder();
+    wgpu::ComputePassEncoder pass = g_encoder.BeginComputePass();
+    pass.SetPipeline(k->pipeline);
+    pass.SetBindGroup(0, group0);
+    pass.SetBindGroup(1, group1);
+    pass.DispatchWorkgroups(gx, gy, gz);
+    pass.End();
+}
+
 void clear_texture(Texture3D *texture, float value) {
+    ensure_clear_kernel(&g_clear3d, CLEAR_TEX3D_WGSL);
+    float v[4] = {value, value, value, value};
+    run_clear(&g_clear3d, texture->ua_view, v,
+              (texture->width + 3) / 4, (texture->height + 3) / 4,
+              (texture->depth + 3) / 4);
 }
 
 void clear_texture(Texture2D *texture, float value) {
+    assert(texture->format == Format::RGBA32_FLOAT);
+    ensure_clear_kernel(&g_clear2d_f, CLEAR_TEX2D_F_WGSL);
+    float v[4] = {value, value, value, value};
+    run_clear(&g_clear2d_f, texture->ua_view, v,
+              (texture->width + 7) / 8, (texture->height + 7) / 8, 1);
 }
 
 void clear_texture_uint(Texture2D *texture, uint32_t value) {
+    assert(texture->format == Format::R32_UINT);
+    ensure_clear_kernel(&g_clear2d_u, CLEAR_TEX2D_U_WGSL);
+    uint32_t v[4] = {value, value, value, value};
+    run_clear(&g_clear2d_u, texture->ua_view, v,
+              (texture->width + 7) / 8, (texture->height + 7) / 8, 1);
 }
 
 void set_texture(Texture2D *texture, uint32_t slot) {
@@ -205,9 +442,6 @@ void unset_texture_compute(uint32_t slot) {
 void unset_texture_sampled_compute(uint32_t slot) {
 }
 
-TextureSampler get_texture_sampler(SampleMode mode, Filter filter) {
-    return {};
-}
 
 void set_blend_state(BlendType type) {
     g_blend = type;
@@ -225,23 +459,6 @@ void draw_mesh(Mesh *mesh) {
         fprintf(stderr, "[graphics] draw_mesh: M2a stub\n");
         warned = true;
     }
-}
-
-ConstantBuffer get_constant_buffer(uint32_t size) {
-    return {};
-}
-
-void update_constant_buffer(ConstantBuffer *buffer, void *data) {
-}
-
-void set_constant_buffer(ConstantBuffer *buffer, uint32_t slot) {
-}
-
-StructuredBuffer get_structured_buffer(int element_stride, int num_elements) {
-    return {};
-}
-
-void update_structured_buffer(StructuredBuffer *buffer, void *data) {
 }
 
 void set_structured_buffer(StructuredBuffer *buffer, uint32_t slot) {
@@ -278,92 +495,28 @@ void set_compute_shader(ComputeShader *shader) {
 void run_compute(int group_count_x, int group_count_y, int group_count_z) {
 }
 
-bool is_ready(RenderTarget *ptr) {
-    return ptr != nullptr && (ptr->is_window || ptr->rt_view);
-}
+bool is_ready(RenderTarget *p)     { return p->is_window || p->rt_view != nullptr; }
+bool is_ready(DepthBuffer *p)      { return p->ds_view != nullptr; }
+bool is_ready(Texture2D *p)        { return p->texture != nullptr; }
+bool is_ready(Texture3D *p)        { return p->texture != nullptr; }
+bool is_ready(Mesh *p)             { return p->vertex_buffer != nullptr; }
+bool is_ready(ConstantBuffer *p)   { return p->buffer != nullptr; }
+bool is_ready(StructuredBuffer *p) { return p->buffer != nullptr; }
+bool is_ready(TextureSampler *p)   { return p->sampler != nullptr; }
+bool is_ready(VertexShader *p)     { return p->valid; }
+bool is_ready(PixelShader *p)      { return p->valid; }
+bool is_ready(ComputeShader *p)    { return p->valid; }
 
-bool is_ready(DepthBuffer *ptr) {
-    return ptr != nullptr && ptr->ds_view;
-}
-
-bool is_ready(Texture2D *ptr) {
-    return ptr != nullptr && ptr->texture;
-}
-
-bool is_ready(Texture3D *ptr) {
-    return ptr != nullptr && ptr->texture;
-}
-
-bool is_ready(Mesh *ptr) {
-    return ptr != nullptr && ptr->vertex_buffer;
-}
-
-bool is_ready(ConstantBuffer *ptr) {
-    return ptr != nullptr && ptr->buffer;
-}
-
-bool is_ready(StructuredBuffer *ptr) {
-    return ptr != nullptr && ptr->buffer;
-}
-
-bool is_ready(TextureSampler *ptr) {
-    return ptr != nullptr && ptr->sampler;
-}
-
-bool is_ready(VertexShader *ptr) {
-    return ptr != nullptr && ptr->valid;
-}
-
-bool is_ready(PixelShader *ptr) {
-    return ptr != nullptr && ptr->valid;
-}
-
-bool is_ready(ComputeShader *ptr) {
-    return ptr != nullptr && ptr->valid;
-}
-
-void release(RenderTarget *ptr) {
-    if (ptr) *ptr = {};
-}
-
-void release(DepthBuffer *ptr) {
-    if (ptr) *ptr = {};
-}
-
-void release(Texture2D *ptr) {
-    if (ptr) *ptr = {};
-}
-
-void release(Texture3D *ptr) {
-    if (ptr) *ptr = {};
-}
-
-void release(Mesh *ptr) {
-    if (ptr) *ptr = {};
-}
-
-void release(ConstantBuffer *ptr) {
-    if (ptr) *ptr = {};
-}
-
-void release(StructuredBuffer *ptr) {
-    if (ptr) *ptr = {};
-}
-
-void release(TextureSampler *ptr) {
-    if (ptr) *ptr = {};
-}
-
-void release(VertexShader *ptr) {
-    if (ptr) *ptr = {};
-}
-
-void release(PixelShader *ptr) {
-    if (ptr) *ptr = {};
-}
-
-void release(ComputeShader *ptr) {
-    if (ptr) *ptr = {};
-}
+void release(RenderTarget *p)     { *p = {}; }
+void release(DepthBuffer *p)      { *p = {}; }
+void release(Texture2D *p)        { *p = {}; }
+void release(Texture3D *p)        { *p = {}; }
+void release(Mesh *p)             { *p = {}; }
+void release(ConstantBuffer *p)   { *p = {}; }
+void release(StructuredBuffer *p) { *p = {}; }
+void release(TextureSampler *p)   { *p = {}; }
+void release(VertexShader *p)     { *p = {}; }
+void release(PixelShader *p)      { *p = {}; }
+void release(ComputeShader *p)    { *p = {}; }
 
 }
