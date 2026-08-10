@@ -1,3 +1,4 @@
 /main_pt.cpp
 /data/
 *.code-workspace
+build/
