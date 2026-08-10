@@ -135,6 +135,20 @@ void release() {
 
 // ---- M2a Task 4/5/6 implement these ----
 
+static void warn_once(const char *what) {
+    // one stderr line per distinct stub, first call only (`what` is always a
+    // string literal, so pointer identity is a valid key)
+    static const char *seen[8] = {};
+    for (int i = 0; i < 8; i++) {
+        if (seen[i] == what) return;
+        if (!seen[i]) {
+            seen[i] = what;
+            fprintf(stderr, "[graphics] %s: stub until M3/M5\n", what);
+            return;
+        }
+    }
+}
+
 static wgpu::TextureFormat to_wgpu(Format f) {
     switch (f) {
         case Format::R32_FLOAT:        return wgpu::TextureFormat::R32Float;
@@ -291,18 +305,23 @@ TextureSampler get_texture_sampler(SampleMode mode, Filter filter) {
 }
 
 Texture2D load_texture2D(std::string filename) {
-    return {};
+    // Palette TGAs load for real in M4 via stb_image; until then a 1x1 white
+    // texture keeps bind groups valid.
+    warn_once("load_texture2D");
+    (void)filename;
+    float white[4] = {1.f, 1.f, 1.f, 1.f};
+    return get_texture2D(white, 1, 1, Format::RGBA32_FLOAT);
 }
 
 void save_texture3D(Texture3D *texture, std::string filename) {
+    (void)texture; (void)filename; warn_once("save_texture3D");
 }
 
 void save_texture2D_HDR(Texture2D *texture, std::string filename) {
+    (void)texture; (void)filename; warn_once("save_texture2D_HDR");
 }
 
-uint32_t capture_current_frame() {
-    return 0;
-}
+uint32_t capture_current_frame() { warn_once("capture_current_frame"); return 0; }
 
 // NOTE: the storage-texture binding is named `tex_target`, not `target` —
 // `target` is a reserved WGSL identifier (Dawn: "'target' is a reserved
@@ -414,17 +433,10 @@ void clear_texture_uint(Texture2D *texture, uint32_t value) {
               (texture->width + 7) / 8, (texture->height + 7) / 8, 1);
 }
 
-void set_texture(Texture2D *texture, uint32_t slot) {
-}
-
-void set_texture(Texture3D *texture, uint32_t slot) {
-}
-
-void unset_texture(uint32_t slot) {
-}
-
-void set_texture_sampler(TextureSampler *sampler, uint32_t slot) {
-}
+void set_texture(Texture2D *t, uint32_t slot)  { (void)t; (void)slot; }
+void set_texture(Texture3D *t, uint32_t slot)  { (void)t; (void)slot; }
+void unset_texture(uint32_t slot)              { (void)slot; }
+void set_texture_sampler(TextureSampler *s, uint32_t slot) { (void)s; (void)slot; }
 
 void set_texture_compute(Texture2D *t, uint32_t slot)  { g_compute_slots[slot] = {}; g_compute_slots[slot].kind = BoundSlot::Kind::STORAGE_TEX; g_compute_slots[slot].view = t->ua_view; }
 void set_texture_compute(Texture3D *t, uint32_t slot)  { g_compute_slots[slot] = {}; g_compute_slots[slot].kind = BoundSlot::Kind::STORAGE_TEX; g_compute_slots[slot].view = t->ua_view; }
@@ -442,16 +454,24 @@ void set_blend_state(BlendType type) {
 Mesh get_mesh(void *vertices, uint32_t vertex_count, uint32_t vertex_stride,
               void *indices, uint32_t index_count, uint32_t index_byte_size,
               Topology topology) {
-    return {};
+    // Real vertex buffer now (M3 draws it); index path unused by main.cpp
+    // (inventory §1: both meshes are non-indexed) — assert it stays that way.
+    assert(indices == nullptr && index_count == 0 && "fork: non-indexed meshes only");
+    (void)index_byte_size;
+    Mesh m = {};
+    wgpu::BufferDescriptor desc = {};
+    desc.size = ((uint64_t)vertex_count * vertex_stride + 3u) & ~3ull;
+    desc.usage = wgpu::BufferUsage::Vertex | wgpu::BufferUsage::CopyDst;
+    m.vertex_buffer = g_ctx.device.CreateBuffer(&desc);
+    g_ctx.queue.WriteBuffer(m.vertex_buffer, 0, vertices,
+                            (uint64_t)vertex_count * vertex_stride);
+    m.vertex_stride = vertex_stride;
+    m.vertex_count = vertex_count;
+    m.topology = topology;
+    return m;
 }
 
-void draw_mesh(Mesh *mesh) {
-    static bool warned = false;
-    if (!warned) {
-        fprintf(stderr, "[graphics] draw_mesh: M2a stub\n");
-        warned = true;
-    }
-}
+void draw_mesh(Mesh *mesh) { (void)mesh; warn_once("draw_mesh"); }
 
 void set_structured_buffer(StructuredBuffer *b, uint32_t slot) { g_compute_slots[slot] = {}; g_compute_slots[slot].kind = BoundSlot::Kind::STORAGE_BUFFER; g_compute_slots[slot].buffer = b->buffer; g_compute_slots[slot].buffer_size = b->size; }
 
@@ -487,11 +507,14 @@ void capture_structured_buffer(StructuredBuffer *buffer, void *mapped_data,
 }
 
 VertexShader get_vertex_shader_from_code(char *code, uint32_t code_length) {
-    return {};
+    (void)code; (void)code_length;
+    VertexShader vs = {}; vs.valid = true;   // M3 compiles real WGSL here
+    return vs;
 }
-
 PixelShader get_pixel_shader_from_code(char *code, uint32_t code_length) {
-    return {};
+    (void)code; (void)code_length;
+    PixelShader ps = {}; ps.valid = true;
+    return ps;
 }
 
 ComputeShader get_compute_shader_from_code(char *code, uint32_t code_length,
@@ -539,11 +562,8 @@ ComputeShader get_compute_shader_from_code(char *code, uint32_t code_length,
     return cs;
 }
 
-void set_vertex_shader(VertexShader *shader) {
-}
-
-void set_pixel_shader(PixelShader *shader) {
-}
+void set_vertex_shader(VertexShader *shader) { (void)shader; }
+void set_pixel_shader(PixelShader *shader)   { (void)shader; }
 
 void set_compute_shader(ComputeShader *shader) {
     g_compute_shader = shader;
