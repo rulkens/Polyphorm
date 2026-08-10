@@ -53,6 +53,12 @@ add_executable(polyphorm
 )
 target_include_directories(polyphorm PRIVATE cpplib)
 target_link_libraries(polyphorm PRIVATE webgpu_dawn webgpu_glfw glfw)
+# -UNDEBUG: see the note below on the test targets — Release mode compiles
+# out every load-bearing assert() (set_constant_buffer slot==0, run_compute
+# valid-shader, clear format asserts, get_mesh non-indexed, ...) unless we
+# re-enable them here too. Without this, contract violations in the real app
+# binary become silent instead of failing loudly.
+target_compile_options(polyphorm PRIVATE -UNDEBUG)
 
 enable_testing()
 # NOTE: the top-level build type in this cache is Release, which passes

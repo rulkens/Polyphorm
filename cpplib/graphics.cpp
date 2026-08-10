@@ -1,6 +1,4 @@
 #include "graphics.h"
-#include "logging.h"   // check what M1 code uses; if logging.cpp is not yet
-                       // compiled, use fprintf(stderr, ...) like gpu_context.cpp
 #include <cassert>
 #include <cstring>
 #include <cstdio>
@@ -31,6 +29,16 @@ static BoundSlot g_compute_slots[MAX_SLOTS];
 static wgpu::Buffer g_uniform_buffer;            // group 0 binding 0
 static uint64_t g_uniform_size = 0;
 static ComputeShader *g_compute_shader = nullptr;
+
+// One lazily-built pipeline + scratch uniform per builtin clear kernel
+// (declared here, ahead of release(), so release() can reset them; the WGSL
+// sources and ensure_clear_kernel()/run_clear() stay further down near the
+// clear_texture* entry points).
+struct ClearKernel {
+    wgpu::ComputePipeline pipeline;
+    wgpu::Buffer uniform;   // 16 bytes
+};
+static ClearKernel g_clear3d, g_clear2d_f, g_clear2d_u;
 
 static void ensure_encoder() {
     if (!g_encoder) g_encoder = g_ctx.device.CreateCommandEncoder();
@@ -127,6 +135,11 @@ void release() {
     flush_commands();
     g_uniform_buffer = nullptr;
     for (uint32_t i = 0; i < MAX_SLOTS; i++) g_compute_slots[i] = {};
+    g_compute_shader = nullptr;
+    g_blend = BlendType::OPAQUE;
+    g_clear3d = {};
+    g_clear2d_f = {};
+    g_clear2d_u = {};
     graphics_context = nullptr;
     // wgpu C++ handles are refcounted; dropping them tears down the device.
     g_ctx = {};
@@ -180,6 +193,12 @@ ConstantBuffer get_constant_buffer(uint32_t size) {
 }
 
 void update_constant_buffer(ConstantBuffer *buffer, void *data) {
+    // queue.WriteBuffer executes in queue order, i.e. BEFORE any command
+    // buffer submitted later — including dispatches already recorded into
+    // g_encoder but not yet flushed. Flush first so those dispatches see the
+    // buffer contents as they stood when they were recorded (D3D11
+    // Map(WRITE_DISCARD) call-order semantics).
+    if (g_encoder) flush_commands();
     // Whole-buffer overwrite, like the D3D11 Map(WRITE_DISCARD)+memcpy.
     g_ctx.queue.WriteBuffer(buffer->buffer, 0, data, buffer->size);
 }
@@ -206,6 +225,8 @@ StructuredBuffer get_structured_buffer(int element_stride, int num_elements) {
 }
 
 void update_structured_buffer(StructuredBuffer *buffer, void *data) {
+    // Same queue-order hazard as update_constant_buffer (see comment there).
+    if (g_encoder) flush_commands();
     g_ctx.queue.WriteBuffer(buffer->buffer, 0, data, buffer->size);
 }
 
@@ -361,13 +382,6 @@ fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
 }
 )";
 
-// One lazily-built pipeline + scratch uniform per clear kernel.
-struct ClearKernel {
-    wgpu::ComputePipeline pipeline;
-    wgpu::Buffer uniform;   // 16 bytes
-};
-static ClearKernel g_clear3d, g_clear2d_f, g_clear2d_u;
-
 static void ensure_clear_kernel(ClearKernel *k, const char *wgsl) {
     if (k->pipeline) return;
     wgpu::ShaderSourceWGSL src = {};
@@ -386,6 +400,11 @@ static void ensure_clear_kernel(ClearKernel *k, const char *wgsl) {
 
 static void run_clear(ClearKernel *k, wgpu::TextureView view, const void *value16,
                       uint32_t gx, uint32_t gy, uint32_t gz) {
+    // k->uniform is a shared per-kernel scratch buffer: two clears with
+    // different values recorded into the same encoder would both read the
+    // last WriteBuffer's value at execution time without this flush (same
+    // queue-order hazard as update_constant_buffer above).
+    if (g_encoder) flush_commands();
     g_ctx.queue.WriteBuffer(k->uniform, 0, value16, 16);
     wgpu::BindGroupEntry e0 = {};
     e0.binding = 0; e0.buffer = k->uniform; e0.size = 16;
@@ -438,13 +457,13 @@ void set_texture(Texture3D *t, uint32_t slot)  { (void)t; (void)slot; }
 void unset_texture(uint32_t slot)              { (void)slot; }
 void set_texture_sampler(TextureSampler *s, uint32_t slot) { (void)s; (void)slot; }
 
-void set_texture_compute(Texture2D *t, uint32_t slot)  { g_compute_slots[slot] = {}; g_compute_slots[slot].kind = BoundSlot::Kind::STORAGE_TEX; g_compute_slots[slot].view = t->ua_view; }
-void set_texture_compute(Texture3D *t, uint32_t slot)  { g_compute_slots[slot] = {}; g_compute_slots[slot].kind = BoundSlot::Kind::STORAGE_TEX; g_compute_slots[slot].view = t->ua_view; }
-void set_texture_sampled_compute(Texture2D *t, uint32_t slot) { g_compute_slots[slot] = {}; g_compute_slots[slot].kind = BoundSlot::Kind::SAMPLED_TEX; g_compute_slots[slot].view = t->sr_view; }
-void set_texture_sampled_compute(Texture3D *t, uint32_t slot) { g_compute_slots[slot] = {}; g_compute_slots[slot].kind = BoundSlot::Kind::SAMPLED_TEX; g_compute_slots[slot].view = t->sr_view; }
-void set_texture_sampler_compute(TextureSampler *s, uint32_t slot) { g_compute_slots[slot] = {}; g_compute_slots[slot].kind = BoundSlot::Kind::SAMPLER; g_compute_slots[slot].sampler = s->sampler; }
-void unset_texture_compute(uint32_t slot)          { g_compute_slots[slot] = {}; }
-void unset_texture_sampled_compute(uint32_t slot)  { g_compute_slots[slot] = {}; }
+void set_texture_compute(Texture2D *t, uint32_t slot)  { assert(slot < MAX_SLOTS); g_compute_slots[slot] = {}; g_compute_slots[slot].kind = BoundSlot::Kind::STORAGE_TEX; g_compute_slots[slot].view = t->ua_view; }
+void set_texture_compute(Texture3D *t, uint32_t slot)  { assert(slot < MAX_SLOTS); g_compute_slots[slot] = {}; g_compute_slots[slot].kind = BoundSlot::Kind::STORAGE_TEX; g_compute_slots[slot].view = t->ua_view; }
+void set_texture_sampled_compute(Texture2D *t, uint32_t slot) { assert(slot < MAX_SLOTS); g_compute_slots[slot] = {}; g_compute_slots[slot].kind = BoundSlot::Kind::SAMPLED_TEX; g_compute_slots[slot].view = t->sr_view; }
+void set_texture_sampled_compute(Texture3D *t, uint32_t slot) { assert(slot < MAX_SLOTS); g_compute_slots[slot] = {}; g_compute_slots[slot].kind = BoundSlot::Kind::SAMPLED_TEX; g_compute_slots[slot].view = t->sr_view; }
+void set_texture_sampler_compute(TextureSampler *s, uint32_t slot) { assert(slot < MAX_SLOTS); g_compute_slots[slot] = {}; g_compute_slots[slot].kind = BoundSlot::Kind::SAMPLER; g_compute_slots[slot].sampler = s->sampler; }
+void unset_texture_compute(uint32_t slot)          { assert(slot < MAX_SLOTS); g_compute_slots[slot] = {}; }
+void unset_texture_sampled_compute(uint32_t slot)  { assert(slot < MAX_SLOTS); g_compute_slots[slot] = {}; }
 
 
 void set_blend_state(BlendType type) {
@@ -473,11 +492,12 @@ Mesh get_mesh(void *vertices, uint32_t vertex_count, uint32_t vertex_stride,
 
 void draw_mesh(Mesh *mesh) { (void)mesh; warn_once("draw_mesh"); }
 
-void set_structured_buffer(StructuredBuffer *b, uint32_t slot) { g_compute_slots[slot] = {}; g_compute_slots[slot].kind = BoundSlot::Kind::STORAGE_BUFFER; g_compute_slots[slot].buffer = b->buffer; g_compute_slots[slot].buffer_size = b->size; }
+void set_structured_buffer(StructuredBuffer *b, uint32_t slot) { assert(slot < MAX_SLOTS); g_compute_slots[slot] = {}; g_compute_slots[slot].kind = BoundSlot::Kind::STORAGE_BUFFER; g_compute_slots[slot].buffer = b->buffer; g_compute_slots[slot].buffer_size = b->size; }
 
 void capture_structured_buffer(StructuredBuffer *buffer, void *mapped_data,
                                uint32_t num_elements, size_t element_size) {
     uint64_t byte_count = (uint64_t)num_elements * element_size;
+    assert(byte_count <= buffer->size);
     if (!buffer->readback) {
         wgpu::BufferDescriptor desc = {};
         desc.size = buffer->size;
