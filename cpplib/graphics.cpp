@@ -304,36 +304,41 @@ uint32_t capture_current_frame() {
     return 0;
 }
 
+// NOTE: the storage-texture binding is named `tex_target`, not `target` —
+// `target` is a reserved WGSL identifier (Dawn: "'target' is a reserved
+// keyword"), which silently failed CreateShaderModule for all three clear
+// kernels (found in Task 5 while wiring up assert()-validated GPU tests;
+// see task-5-report.md for the deviation writeup).
 static const char *CLEAR_TEX3D_WGSL = R"(
 @group(0) @binding(0) var<uniform> clear_value : vec4<f32>;
-@group(1) @binding(0) var target : texture_storage_3d<r32float, write>;
+@group(1) @binding(0) var tex_target : texture_storage_3d<r32float, write>;
 @compute @workgroup_size(4, 4, 4)
 fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-    let dims = textureDimensions(target);
+    let dims = textureDimensions(tex_target);
     if (gid.x >= dims.x || gid.y >= dims.y || gid.z >= dims.z) { return; }
-    textureStore(target, gid, clear_value);
+    textureStore(tex_target, gid, clear_value);
 }
 )";
 
 static const char *CLEAR_TEX2D_F_WGSL = R"(
 @group(0) @binding(0) var<uniform> clear_value : vec4<f32>;
-@group(1) @binding(0) var target : texture_storage_2d<rgba32float, write>;
+@group(1) @binding(0) var tex_target : texture_storage_2d<rgba32float, write>;
 @compute @workgroup_size(8, 8, 1)
 fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-    let dims = textureDimensions(target);
+    let dims = textureDimensions(tex_target);
     if (gid.x >= dims.x || gid.y >= dims.y) { return; }
-    textureStore(target, gid.xy, clear_value);
+    textureStore(tex_target, gid.xy, clear_value);
 }
 )";
 
 static const char *CLEAR_TEX2D_U_WGSL = R"(
 @group(0) @binding(0) var<uniform> clear_value : vec4<u32>;
-@group(1) @binding(0) var target : texture_storage_2d<r32uint, write>;
+@group(1) @binding(0) var tex_target : texture_storage_2d<r32uint, write>;
 @compute @workgroup_size(8, 8, 1)
 fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-    let dims = textureDimensions(target);
+    let dims = textureDimensions(tex_target);
     if (gid.x >= dims.x || gid.y >= dims.y) { return; }
-    textureStore(target, gid.xy, clear_value);
+    textureStore(tex_target, gid.xy, clear_value);
 }
 )";
 
@@ -421,26 +426,13 @@ void unset_texture(uint32_t slot) {
 void set_texture_sampler(TextureSampler *sampler, uint32_t slot) {
 }
 
-void set_texture_compute(Texture2D *texture, uint32_t slot) {
-}
-
-void set_texture_compute(Texture3D *texture, uint32_t slot) {
-}
-
-void set_texture_sampled_compute(Texture2D *texture, uint32_t slot) {
-}
-
-void set_texture_sampled_compute(Texture3D *texture, uint32_t slot) {
-}
-
-void set_texture_sampler_compute(TextureSampler *sampler, uint32_t slot) {
-}
-
-void unset_texture_compute(uint32_t slot) {
-}
-
-void unset_texture_sampled_compute(uint32_t slot) {
-}
+void set_texture_compute(Texture2D *t, uint32_t slot)  { g_compute_slots[slot] = {}; g_compute_slots[slot].kind = BoundSlot::Kind::STORAGE_TEX; g_compute_slots[slot].view = t->ua_view; }
+void set_texture_compute(Texture3D *t, uint32_t slot)  { g_compute_slots[slot] = {}; g_compute_slots[slot].kind = BoundSlot::Kind::STORAGE_TEX; g_compute_slots[slot].view = t->ua_view; }
+void set_texture_sampled_compute(Texture2D *t, uint32_t slot) { g_compute_slots[slot] = {}; g_compute_slots[slot].kind = BoundSlot::Kind::SAMPLED_TEX; g_compute_slots[slot].view = t->sr_view; }
+void set_texture_sampled_compute(Texture3D *t, uint32_t slot) { g_compute_slots[slot] = {}; g_compute_slots[slot].kind = BoundSlot::Kind::SAMPLED_TEX; g_compute_slots[slot].view = t->sr_view; }
+void set_texture_sampler_compute(TextureSampler *s, uint32_t slot) { g_compute_slots[slot] = {}; g_compute_slots[slot].kind = BoundSlot::Kind::SAMPLER; g_compute_slots[slot].sampler = s->sampler; }
+void unset_texture_compute(uint32_t slot)          { g_compute_slots[slot] = {}; }
+void unset_texture_sampled_compute(uint32_t slot)  { g_compute_slots[slot] = {}; }
 
 
 void set_blend_state(BlendType type) {
@@ -461,11 +453,37 @@ void draw_mesh(Mesh *mesh) {
     }
 }
 
-void set_structured_buffer(StructuredBuffer *buffer, uint32_t slot) {
-}
+void set_structured_buffer(StructuredBuffer *b, uint32_t slot) { g_compute_slots[slot] = {}; g_compute_slots[slot].kind = BoundSlot::Kind::STORAGE_BUFFER; g_compute_slots[slot].buffer = b->buffer; g_compute_slots[slot].buffer_size = b->size; }
 
 void capture_structured_buffer(StructuredBuffer *buffer, void *mapped_data,
                                uint32_t num_elements, size_t element_size) {
+    uint64_t byte_count = (uint64_t)num_elements * element_size;
+    if (!buffer->readback) {
+        wgpu::BufferDescriptor desc = {};
+        desc.size = buffer->size;
+        desc.usage = wgpu::BufferUsage::MapRead | wgpu::BufferUsage::CopyDst;
+        buffer->readback = g_ctx.device.CreateBuffer(&desc);
+    }
+    // Flush pending compute, copy, submit, block on map — reproducing the
+    // D3D11 Map(D3D11_MAP_READ) same-frame stall (inventory §6). Latency is a
+    // conscious non-goal here: correctness first, matching original behavior.
+    ensure_encoder();
+    g_encoder.CopyBufferToBuffer(buffer->buffer, 0, buffer->readback, 0, buffer->size);
+    flush_commands();
+
+    bool done = false;
+    buffer->readback.MapAsync(
+        wgpu::MapMode::Read, 0, buffer->size, wgpu::CallbackMode::AllowProcessEvents,
+        [&done](wgpu::MapAsyncStatus status, wgpu::StringView message) {
+            if (status != wgpu::MapAsyncStatus::Success)
+                fprintf(stderr, "[graphics] readback map failed: %.*s\n",
+                        (int)message.length, message.data);
+            done = true;
+        });
+    wait_for(&done);
+    const void *src = buffer->readback.GetConstMappedRange(0, buffer->size);
+    if (src) memcpy(mapped_data, src, byte_count);
+    buffer->readback.Unmap();
 }
 
 VertexShader get_vertex_shader_from_code(char *code, uint32_t code_length) {
@@ -479,7 +497,46 @@ PixelShader get_pixel_shader_from_code(char *code, uint32_t code_length) {
 ComputeShader get_compute_shader_from_code(char *code, uint32_t code_length,
                                            const ShaderConstant *constants,
                                            uint32_t constant_count) {
-    return {};
+    ComputeShader cs = {};
+    // file_system::read_file guarantees a trailing NUL (Task 1), so `code` is
+    // a valid C string; code_length is unused but kept for signature parity.
+    (void)code_length;
+
+    g_ctx.device.PushErrorScope(wgpu::ErrorFilter::Validation);
+
+    wgpu::ShaderSourceWGSL src = {};
+    src.code = code;
+    wgpu::ShaderModuleDescriptor mod_desc = {};
+    mod_desc.nextInChain = &src;
+    wgpu::ShaderModule module = g_ctx.device.CreateShaderModule(&mod_desc);
+
+    std::vector<wgpu::ConstantEntry> entries(constant_count);
+    for (uint32_t i = 0; i < constant_count; i++) {
+        entries[i] = {};
+        entries[i].key = constants[i].name;
+        entries[i].value = constants[i].value;
+    }
+    wgpu::ComputePipelineDescriptor desc = {};
+    desc.compute.module = module;
+    desc.compute.constantCount = constant_count;
+    desc.compute.constants = entries.data();
+    cs.pipeline = g_ctx.device.CreateComputePipeline(&desc);
+
+    bool done = false, had_error = false;
+    g_ctx.device.PopErrorScope(
+        wgpu::CallbackMode::AllowProcessEvents,
+        [&done, &had_error](wgpu::PopErrorScopeStatus, wgpu::ErrorType type,
+                            wgpu::StringView message) {
+            if (type != wgpu::ErrorType::NoError) {
+                had_error = true;
+                fprintf(stderr, "[graphics] shader/pipeline error: %.*s\n",
+                        (int)message.length, message.data);
+            }
+            done = true;
+        });
+    wait_for(&done);
+    cs.valid = !had_error;
+    return cs;
 }
 
 void set_vertex_shader(VertexShader *shader) {
@@ -492,7 +549,51 @@ void set_compute_shader(ComputeShader *shader) {
     g_compute_shader = shader;
 }
 
-void run_compute(int group_count_x, int group_count_y, int group_count_z) {
+void run_compute(int gx, int gy, int gz) {
+    assert(g_compute_shader && g_compute_shader->valid);
+    ensure_encoder();
+
+    // Group 0: uniform at binding 0, if the shader declares one.
+    // Group 1: every currently-bound slot. CONTRACT: the bound slot set must
+    // exactly match the shader's @group(1) declarations — extra or missing
+    // entries are a Dawn validation error (which names the binding; that is
+    // the intended failure mode, better than D3D11's silent null reads).
+    wgpu::BindGroup group0;
+    if (g_uniform_buffer) {
+        wgpu::BindGroupEntry e = {};
+        e.binding = 0; e.buffer = g_uniform_buffer; e.size = g_uniform_size;
+        wgpu::BindGroupDescriptor d = {};
+        d.layout = g_compute_shader->pipeline.GetBindGroupLayout(0);
+        d.entryCount = 1; d.entries = &e;
+        group0 = g_ctx.device.CreateBindGroup(&d);
+    }
+
+    std::vector<wgpu::BindGroupEntry> entries;
+    for (uint32_t i = 0; i < MAX_SLOTS; i++) {
+        const BoundSlot &s = g_compute_slots[i];
+        if (s.kind == BoundSlot::Kind::NONE) continue;
+        wgpu::BindGroupEntry e = {};
+        e.binding = i;
+        switch (s.kind) {
+            case BoundSlot::Kind::STORAGE_BUFFER: e.buffer = s.buffer; e.size = s.buffer_size; break;
+            case BoundSlot::Kind::STORAGE_TEX:
+            case BoundSlot::Kind::SAMPLED_TEX:    e.textureView = s.view; break;
+            case BoundSlot::Kind::SAMPLER:        e.sampler = s.sampler; break;
+            default: break;
+        }
+        entries.push_back(e);
+    }
+    wgpu::BindGroupDescriptor d1 = {};
+    d1.layout = g_compute_shader->pipeline.GetBindGroupLayout(1);
+    d1.entryCount = entries.size(); d1.entries = entries.data();
+    wgpu::BindGroup group1 = g_ctx.device.CreateBindGroup(&d1);
+
+    wgpu::ComputePassEncoder pass = g_encoder.BeginComputePass();
+    pass.SetPipeline(g_compute_shader->pipeline);
+    if (group0) pass.SetBindGroup(0, group0);
+    pass.SetBindGroup(1, group1);
+    pass.DispatchWorkgroups((uint32_t)gx, (uint32_t)gy, (uint32_t)gz);
+    pass.End();
 }
 
 bool is_ready(RenderTarget *p)     { return p->is_window || p->rt_view != nullptr; }

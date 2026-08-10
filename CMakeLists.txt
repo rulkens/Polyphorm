@@ -55,6 +55,14 @@ target_include_directories(polyphorm PRIVATE cpplib)
 target_link_libraries(polyphorm PRIVATE webgpu_dawn webgpu_glfw glfw)
 
 enable_testing()
+# NOTE: the top-level build type in this cache is Release, which passes
+# -DNDEBUG globally and silently compiles out every assert() the test
+# binaries rely on for validation (discovered in Task 5 while wiring up
+# graphics_tests: a deliberately-broken shader path still printed "passed").
+# Fixing this by setting CMAKE_BUILD_TYPE would force a full recompile of
+# Dawn's ~200 targets under the incremental-build-only constraint, so instead
+# -UNDEBUG is applied narrowly to the test targets only, re-enabling assert()
+# for them without touching Dawn's build flags.
 add_executable(cpplib_tests
   tests/platform_input_tests.cpp
   cpplib/platform.cpp
@@ -63,6 +71,7 @@ add_executable(cpplib_tests
 )
 target_include_directories(cpplib_tests PRIVATE cpplib)
 target_link_libraries(cpplib_tests PRIVATE glfw)
+target_compile_options(cpplib_tests PRIVATE -UNDEBUG)
 add_test(NAME cpplib_tests COMMAND cpplib_tests)
 
 add_executable(file_system_tests
@@ -70,4 +79,21 @@ add_executable(file_system_tests
   cpplib/file_system.cpp
 )
 target_compile_features(file_system_tests PRIVATE cxx_std_17)
+target_compile_options(file_system_tests PRIVATE -UNDEBUG)
 add_test(NAME file_system_tests COMMAND file_system_tests)
+
+add_executable(graphics_tests
+  tests/graphics_tests.cpp
+  cpplib/graphics.cpp
+  cpplib/file_system.cpp
+  cpplib/gpu/gpu_context.cpp
+  cpplib/platform.cpp
+  cpplib/input.cpp
+)
+target_compile_features(graphics_tests PRIVATE cxx_std_17)
+target_compile_definitions(graphics_tests PRIVATE
+  TEST_SHADER_DIR="${CMAKE_SOURCE_DIR}/shaders/tests")
+target_include_directories(graphics_tests PRIVATE ${CMAKE_SOURCE_DIR}/cpplib)
+target_link_libraries(graphics_tests PRIVATE webgpu_dawn webgpu_glfw glfw)
+target_compile_options(graphics_tests PRIVATE -UNDEBUG)
+add_test(NAME graphics_tests COMMAND graphics_tests)
