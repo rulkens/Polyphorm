@@ -40,7 +40,7 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(dawn)
 
 add_executable(polyphorm
-  main_m1.cpp
+  main.cpp
   cpplib/platform.cpp
   cpplib/input.cpp
   cpplib/maths.cpp
@@ -54,6 +54,12 @@ add_executable(polyphorm
 )
 target_include_directories(polyphorm PRIVATE cpplib)
 target_link_libraries(polyphorm PRIVATE webgpu_dawn webgpu_glfw glfw)
+target_compile_definitions(polyphorm PRIVATE SHADER_ROOT="${CMAKE_SOURCE_DIR}/shaders")
+# main.cpp includes font.h (kept per M2b port plan for M4 reuse) but never calls
+# font::init(); the ui stub doesn't render text. Only the FreeType headers are
+# needed to compile the include -- font.cpp/libfreetype are not linked.
+find_package(Freetype REQUIRED)
+target_include_directories(polyphorm PRIVATE ${FREETYPE_INCLUDE_DIRS})
 # -UNDEBUG: see the note below on the test targets — Release mode compiles
 # out every load-bearing assert() (set_constant_buffer slot==0, run_compute
 # valid-shader, clear format asserts, get_mesh non-indexed, ...) unless we

@@ -8,14 +8,15 @@
 #include "input.h"
 #include "random.h"
 #include <cassert>
-#include <mmsystem.h>
 #include "logging.h"
+#include <cstddef>
 #include <sstream>
 #include <fstream>
 
-//*** Truncation from double to float warning
-#pragma warning(disable:4305)
-#pragma warning(disable:4244)
+// Upstream (D3D11-era) main.cpp used these types unqualified; graphics.h now
+// namespaces them (M2a port). Rather than prefix every one of the ~150 call
+// sites below, pull the fork's graphics:: types/enums into scope here.
+using namespace graphics;
 
 //====================================================================
 
@@ -252,6 +253,11 @@ struct SimulationConfig {
     int n_iteration;
     int filler3;
 };
+static_assert(sizeof(SimulationConfig) == 64, "SimulationConfig must stay 16 4-byte scalars (WGSL uniform layout match)");
+static_assert(offsetof(SimulationConfig, deposit_value) == 16, "layout drift");
+static_assert(offsetof(SimulationConfig, world_height) == 32, "layout drift");
+static_assert(offsetof(SimulationConfig, n_data_points) == 48, "layout drift");
+static_assert(offsetof(SimulationConfig, filler3) == 60, "layout drift");
 
 struct RenderingConfig {
     Matrix4x4 projection;
@@ -303,6 +309,7 @@ struct RenderingConfig {
     float guiding_strength;
     float scattering_anisotropy;
 };
+static_assert(sizeof(RenderingConfig) == 3 * 64 + 36 * 4, "RenderingConfig layout");
 
 struct StatisticsConfig {
     int n_data_points;
@@ -315,6 +322,7 @@ struct StatisticsConfig {
     float world_depth;
     int filler3;
 };
+static_assert(sizeof(StatisticsConfig) == 32, "StatisticsConfig layout");
 
 float quad_vertices[] = {
     -1.0f, -1.0f, 0.0f, 1.0f,
@@ -438,7 +446,7 @@ int main(int argc, char **argv)
     graphics::init();
     graphics::init_swap_chain(&window);
 
-    font::init();
+    // M4: font::init returns with ImGui
     ui::init((float)window_width, (float)window_height);
     ui::set_input_responsive(true);
 
@@ -447,143 +455,61 @@ int main(int argc, char **argv)
     assert(graphics::is_ready(&render_target_window));
     DepthBuffer depth_buffer = graphics::get_depth_buffer(window_width, window_height);
     assert(graphics::is_ready(&depth_buffer));
-    graphics::set_render_targets_viewport(&render_target_window, &depth_buffer);
+    graphics::set_render_targets_viewport(&render_target_window);
 
-    // Rendering shader for rendering individual particles
-    File draw_compute_shader_file_particle = file_system::read_file("cs_particles_transform.hlsl");
-    ComputeShader draw_compute_shader_particle = graphics::get_compute_shader_from_code((char *)draw_compute_shader_file_particle.data, draw_compute_shader_file_particle.size);
-    file_system::release_file(draw_compute_shader_file_particle);
-    assert(graphics::is_ready(&draw_compute_shader_particle));
-    printf("cs_particles_transform shader compiled...\n");
+    // M2b: only the simulation kernels are ported to WGSL. Render-path
+    // shaders return in M3 (particles) and M4 (volume/PT).
+    auto load_compute = [](const char *path) {
+        File f = file_system::read_file(path);
+        if (!f.data) { logging::print_error("shader file missing: %s", path); assert(false); }
+        ComputeShader cs = graphics::get_compute_shader_from_code((char *)f.data, f.size);
+        file_system::release_file(f);
+        assert(graphics::is_ready(&cs));
+        printf("%s compiled...\n", path);
+        return cs;
+    };
+    ComputeShader compute_shader = load_compute(SHADER_ROOT "/cs_agents_propagate.wgsl");
+    ComputeShader decay_compute_shader = load_compute(SHADER_ROOT "/cs_field_decay.wgsl");
+    ComputeShader cs_density_histo = load_compute(SHADER_ROOT "/cs_density_histo.wgsl");
 
-    // Shader for blitting from uint to float texture.
-    File blit_compute_shader_file = file_system::read_file("cs_particles_blit.hlsl");
-    ComputeShader blit_compute_shader = graphics::get_compute_shader_from_code((char *)blit_compute_shader_file.data, blit_compute_shader_file.size);
-    file_system::release_file(blit_compute_shader_file);
-    assert(graphics::is_ready(&blit_compute_shader));
-    printf("cs_particles_blit shader compiled...\n");
-
-    // Vertex shader
-    File vertex_shader_file = file_system::read_file("vs_3d.hlsl"); 
-    VertexShader vertex_shader = graphics::get_vertex_shader_from_code((char *)vertex_shader_file.data, vertex_shader_file.size);
-    file_system::release_file(vertex_shader_file);
-    assert(graphics::is_ready(&vertex_shader));
-    printf("vs_3d shader compiled...\n");
-
-    // Pixel shader
-    File pixel_shader_file = file_system::read_file("ps_volume_trace.hlsl"); 
-    PixelShader pixel_shader = graphics::get_pixel_shader_from_code((char *)pixel_shader_file.data, pixel_shader_file.size);
-    file_system::release_file(pixel_shader_file);
-    assert(graphics::is_ready(&pixel_shader));
-    printf("ps_volume_trace shader compiled...\n");
-
-    // Volume shader for highlighting AOIs
-    File ps_volume_highlight_file = file_system::read_file("ps_volume_highlight.hlsl"); 
-    PixelShader ps_volume_highlight = graphics::get_pixel_shader_from_code((char *)ps_volume_highlight_file.data, ps_volume_highlight_file.size);
-    file_system::release_file(ps_volume_highlight_file);
-    assert(graphics::is_ready(&ps_volume_highlight));
-    printf("ps_volume_highlight shader compiled...\n");
-
-    // Volume shader for highlighting AOIs
-    File ps_volume_halocolor_file = file_system::read_file("ps_volume_halocolor.hlsl"); 
-    PixelShader ps_volume_halocolor = graphics::get_pixel_shader_from_code((char *)ps_volume_halocolor_file.data, ps_volume_halocolor_file.size);
-    file_system::release_file(ps_volume_halocolor_file);
-    assert(graphics::is_ready(&ps_volume_halocolor));
-    printf("ps_volume_halocolor shader compiled...\n");
-
-    // Volume shader for segmenting overdensities
-    File ps_volume_overdensity_file = file_system::read_file("ps_volume_overdensity.hlsl"); 
-    PixelShader ps_volume_overdensity = graphics::get_pixel_shader_from_code((char *)ps_volume_overdensity_file.data, ps_volume_overdensity_file.size);
-    file_system::release_file(ps_volume_overdensity_file);
-    assert(graphics::is_ready(&ps_volume_overdensity));
-    printf("ps_volume_overdensity shader compiled...\n");
-
-    // Volume shader for visualizing filament directionality/velocity
-    File ps_volume_velocity_file = file_system::read_file("ps_volume_velocity.hlsl"); 
-    PixelShader ps_volume_velocity = graphics::get_pixel_shader_from_code((char *)ps_volume_velocity_file.data, ps_volume_velocity_file.size);
-    file_system::release_file(ps_volume_velocity_file);
-    assert(graphics::is_ready(&ps_volume_velocity));
-    printf("ps_volume_velocity shader compiled...\n");
-
-    // Particle system shader
-    File compute_shader_file = file_system::read_file("cs_agents_propagate.hlsl");
-    ComputeShader compute_shader = graphics::get_compute_shader_from_code((char *)compute_shader_file.data, compute_shader_file.size);
-    file_system::release_file(compute_shader_file);
-    assert(graphics::is_ready(&compute_shader));
-    printf("cs_agents_propagate shader compiled...\n");
-
-    // Particle sorting shader
-    File sort_shader_file = file_system::read_file("cs_agents_sort.hlsl");
-    ComputeShader sort_shader = graphics::get_compute_shader_from_code((char *)sort_shader_file.data, sort_shader_file.size);
-    file_system::release_file(sort_shader_file);
-    assert(graphics::is_ready(&sort_shader));
-    printf("cs_agents_sort shader compiled...\n");
-
-    // Decay/diffusion shader
-    File decay_compute_shader_file = file_system::read_file("cs_field_decay.hlsl");
-    ComputeShader decay_compute_shader = graphics::get_compute_shader_from_code((char *)decay_compute_shader_file.data, decay_compute_shader_file.size);
-    file_system::release_file(decay_compute_shader_file);
-    assert(graphics::is_ready(&decay_compute_shader));
-    printf("cs_field_decay shader compiled...\n");
-
-    // Vertex shader for displaying textures.
-    vertex_shader_file = file_system::read_file("vs_2d.hlsl"); 
-    VertexShader vertex_shader_2d = graphics::get_vertex_shader_from_code((char *)vertex_shader_file.data, vertex_shader_file.size);
-    file_system::release_file(vertex_shader_file);
-    assert(graphics::is_ready(&vertex_shader_2d));
-    printf("vs_2d shader compiled...\n");
-
-    // Pixel shader for displaying textures.
-    pixel_shader_file = file_system::read_file("ps_particles_color.hlsl"); 
-    PixelShader pixel_shader_2d = graphics::get_pixel_shader_from_code((char *)pixel_shader_file.data, pixel_shader_file.size);
-    file_system::release_file(pixel_shader_file);
-    assert(graphics::is_ready(&pixel_shader_2d));
-    printf("ps_particles_color shader compiled...\n");
-
-    // Particle density histogram shader
-    File file_cs_density_histo = file_system::read_file("cs_density_histo.hlsl");
-    ComputeShader cs_density_histo = graphics::get_compute_shader_from_code((char *)file_cs_density_histo.data, file_cs_density_histo.size);
-    file_system::release_file(file_cs_density_histo);
-    assert(graphics::is_ready(&cs_density_histo));
-    printf("cs_density_histo shader compiled...\n");
-
-    // Volumetric path tracer
-    File file_cs_volpath = file_system::read_file("cs_volpath.hlsl");
-    ComputeShader cs_volpath = graphics::get_compute_shader_from_code((char *)file_cs_volpath.data, file_cs_volpath.size);
-    file_system::release_file(file_cs_volpath);
-    assert(graphics::is_ready(&cs_volpath));
-    printf("cs_volpath shader compiled...\n");
-
-    File file_ps_volpath = file_system::read_file("ps_volpath.hlsl");
-    PixelShader ps_volpath = graphics::get_pixel_shader_from_code((char *)file_ps_volpath.data, file_ps_volpath.size);
-    file_system::release_file(file_ps_volpath);
-    assert(graphics::is_ready(&ps_volpath));
-    printf("ps_volpath shader compiled...\n");
+    // M3: cs_particles_transform, cs_particles_blit, cs_agents_sort (upstream default-off)
+    // M4: cs_volpath + all vs_/ps_ shaders
+    ComputeShader draw_compute_shader_particle = {};
+    ComputeShader blit_compute_shader = {};
+    ComputeShader sort_shader = {};
+    ComputeShader cs_volpath = {};
+    VertexShader vertex_shader = {}, vertex_shader_2d = {};
+    PixelShader pixel_shader = {}, pixel_shader_2d = {}, ps_volume_highlight = {},
+                ps_volume_halocolor = {}, ps_volume_overdensity = {}, ps_volume_velocity = {}, ps_volpath = {};
 
     // Textures for the simulation
     #ifdef HALO_COLOR_ANALYSIS
-    Texture3D trail_tex_A = graphics::get_texture3D(NULL, GRID_RESOLUTION_X, GRID_RESOLUTION_Y, GRID_RESOLUTION_Z, DXGI_FORMAT_R16G16_FLOAT, 4);
-    Texture3D trail_tex_B = graphics::get_texture3D(NULL, GRID_RESOLUTION_X, GRID_RESOLUTION_Y, GRID_RESOLUTION_Z, DXGI_FORMAT_R16G16_FLOAT, 4);
+    // M-later: widen format for this analysis mode
+    Texture3D trail_tex_A = graphics::get_texture3D(NULL, GRID_RESOLUTION_X, GRID_RESOLUTION_Y, GRID_RESOLUTION_Z, graphics::Format::R32_FLOAT, 4);
+    Texture3D trail_tex_B = graphics::get_texture3D(NULL, GRID_RESOLUTION_X, GRID_RESOLUTION_Y, GRID_RESOLUTION_Z, graphics::Format::R32_FLOAT, 4);
     #else
-    Texture3D trail_tex_A = graphics::get_texture3D(NULL, GRID_RESOLUTION_X, GRID_RESOLUTION_Y, GRID_RESOLUTION_Z, DXGI_FORMAT_R16_FLOAT, 2);
-    Texture3D trail_tex_B = graphics::get_texture3D(NULL, GRID_RESOLUTION_X, GRID_RESOLUTION_Y, GRID_RESOLUTION_Z, DXGI_FORMAT_R16_FLOAT, 2);
+    // QUIRK(r16f_channel_truncation): upstream R16_FLOAT single-channel; r32float is the exact-match WebGPU storage format (translation-notes §0). VAC scale: ~2.5 GB each.
+    Texture3D trail_tex_A = graphics::get_texture3D(NULL, GRID_RESOLUTION_X, GRID_RESOLUTION_Y, GRID_RESOLUTION_Z, graphics::Format::R32_FLOAT, 4);
+    Texture3D trail_tex_B = graphics::get_texture3D(NULL, GRID_RESOLUTION_X, GRID_RESOLUTION_Y, GRID_RESOLUTION_Z, graphics::Format::R32_FLOAT, 4);
     #endif
     #ifdef VELOCITY_ANALYSIS
-    Texture3D trace_tex = graphics::get_texture3D(NULL, GRID_RESOLUTION_X, GRID_RESOLUTION_Y, GRID_RESOLUTION_Z, DXGI_FORMAT_R16G16B16A16_FLOAT, 8);
+    // M-later: widen format for this analysis mode
+    Texture3D trace_tex = graphics::get_texture3D(NULL, GRID_RESOLUTION_X, GRID_RESOLUTION_Y, GRID_RESOLUTION_Z, graphics::Format::R32_FLOAT, 8);
     #else
-    Texture3D trace_tex = graphics::get_texture3D(NULL, GRID_RESOLUTION_X, GRID_RESOLUTION_Y, GRID_RESOLUTION_Z, DXGI_FORMAT_R16_FLOAT, 2);
+    // QUIRK(r16f_channel_truncation): upstream R16_FLOAT single-channel; r32float is the exact-match WebGPU storage format (translation-notes §0). VAC scale: ~2.5 GB each.
+    Texture3D trace_tex  = graphics::get_texture3D(NULL, GRID_RESOLUTION_X, GRID_RESOLUTION_Y, GRID_RESOLUTION_Z, graphics::Format::R32_FLOAT, 4);
     #endif
-    Texture2D display_tex = graphics::get_texture2D(NULL, window_width, window_height, DXGI_FORMAT_R32G32B32A32_FLOAT, 16);
-    Texture2D display_tex_uint = graphics::get_texture2D(NULL, window_width, window_height, DXGI_FORMAT_R32_UINT, 4);
+    Texture2D display_tex = graphics::get_texture2D(NULL, window_width, window_height, graphics::Format::RGBA32_FLOAT, 16);      // M3: framebuffer-vs-logical decision
+    Texture2D display_tex_uint = graphics::get_texture2D(NULL, window_width, window_height, graphics::Format::R32_UINT, 4);
     Texture2D palette_trace_tex = graphics::load_texture2D(COLOR_PALETTE_TRACE);
     Texture2D palette_data_tex = graphics::load_texture2D(COLOR_PALETTE_DATA);
 
-    TextureSampler tex_sampler_trace = graphics::get_texture_sampler(CLAMP, D3D11_FILTER_ANISOTROPIC);
-    TextureSampler tex_sampler_deposit = graphics::get_texture_sampler(CLAMP, D3D11_FILTER_ANISOTROPIC);
+    TextureSampler tex_sampler_trace = graphics::get_texture_sampler(graphics::CLAMP, graphics::Filter::ANISOTROPIC);
+    TextureSampler tex_sampler_deposit = graphics::get_texture_sampler(graphics::CLAMP, graphics::Filter::ANISOTROPIC);
     TextureSampler tex_sampler_display = graphics::get_texture_sampler();
     TextureSampler tex_sampler_color_palette = graphics::get_texture_sampler();
-    
-	graphics::set_blend_state(BlendType::ALPHA);
+
+	graphics::set_blend_state(graphics::BlendType::ALPHA);
 
     // Particles setup
     float *particles_x = memory::alloc_heap<float>(NUM_PARTICLES);
@@ -920,10 +846,9 @@ int main(int argc, char **argv)
                 graphics::update_structured_buffer(&particles_buffer_phi, particles_phi);
                 graphics::update_structured_buffer(&particles_buffer_theta, particles_theta);
                 graphics::update_structured_buffer(&particles_buffer_weights, particles_weights);
-                float clear_tex[4] = {0, 0, 0, 0};
-                graphics_context->context->ClearUnorderedAccessViewFloat(trail_tex_A.ua_view, clear_tex);
-                graphics_context->context->ClearUnorderedAccessViewFloat(trail_tex_B.ua_view, clear_tex);
-                graphics_context->context->ClearUnorderedAccessViewFloat(trace_tex.ua_view, clear_tex);
+                graphics::clear_texture(&trail_tex_A, 0.0f);
+                graphics::clear_texture(&trail_tex_B, 0.0f);
+                graphics::clear_texture(&trace_tex, 0.0f);
                 reset_eplot();
                 simulation_config.n_iteration = 0;
             }
@@ -933,8 +858,7 @@ int main(int argc, char **argv)
             if (input::key_pressed(KeyCode::F6)) store_deposit = true;
             if (input::key_pressed(KeyCode::F7)) capture_screen = !capture_screen;
             if (input::key_pressed(KeyCode::F8)) { // Reset only trace
-                float clear_trace[4] = {0, 0, 0, 0};
-                graphics_context->context->ClearUnorderedAccessViewFloat(trace_tex.ua_view, clear_trace);
+                graphics::clear_texture(&trace_tex, 0.0f);
             }
             if (input::key_pressed(KeyCode::F9)) {
                 std::fstream visu_state;
@@ -1003,10 +927,17 @@ int main(int argc, char **argv)
             graphics::run_compute(10, 10, grid_z);
             graphics::unset_texture_compute(0);
             graphics::unset_texture_compute(1);
+            graphics::unset_structured_buffer(2);
+            graphics::unset_structured_buffer(3);
+            graphics::unset_structured_buffer(4);
+            graphics::unset_structured_buffer(5);
+            graphics::unset_structured_buffer(6);
+            graphics::unset_structured_buffer(7);
         }
 
         // Partial agent sorting
-        if (run_mold && sort_agents)
+        // M3+: cs_agents_sort not yet ported (upstream toggle is commented out; default off)
+        if (run_mold && sort_agents && graphics::is_ready(&sort_shader))
         {
             graphics::set_compute_shader(&sort_shader);
             graphics::set_structured_buffer(&particles_buffer_x, 2);
@@ -1035,6 +966,7 @@ int main(int argc, char **argv)
                 graphics::set_texture_compute(&trail_tex_A, 1);
             }
             graphics::set_texture_compute(&trace_tex, 2);
+            graphics::set_constant_buffer(&config_buffer, 0);
             graphics::run_compute(GRID_RESOLUTION_X / 8, GRID_RESOLUTION_Y / 8, GRID_RESOLUTION_Z / 8);
             
             graphics::unset_texture_compute(0);
@@ -1065,6 +997,12 @@ int main(int argc, char **argv)
             graphics::run_compute(10, 10, grid_z);
 
             graphics::unset_texture_compute(0);
+            graphics::unset_structured_buffer(1);
+            graphics::unset_structured_buffer(2);
+            graphics::unset_structured_buffer(3);
+            graphics::unset_structured_buffer(4);
+            graphics::unset_structured_buffer(5);
+            graphics::unset_structured_buffer(6);
         }
 
         // Export the current state of the simulation
@@ -1163,26 +1101,9 @@ int main(int argc, char **argv)
             graphics::clear_render_target(&render_target_window, background_color, background_color, background_color, 1.0);
             
             if(vis_mode == VisualizationMode::VM_PARTICLES) {
-                uint32_t clear_tex_uint[4] = {0, 0, 0, 0};
-                graphics_context->context->ClearUnorderedAccessViewUint(display_tex_uint.ua_view, clear_tex_uint);
+                // M3: particle draw path (cs_particles_transform + cs_particles_blit not yet ported).
+                // The quad draw below is a draw_mesh stub no-op until then.
                 graphics::update_constant_buffer(&rendering_settings_buffer, &rendering_config);
-                graphics::set_compute_shader(&draw_compute_shader_particle);
-                graphics::set_structured_buffer(&particles_buffer_theta, 6);
-                graphics::set_texture_compute(&display_tex_uint, 0);
-                graphics::set_structured_buffer(&particles_buffer_x, 2);
-                graphics::set_structured_buffer(&particles_buffer_y, 3);
-                graphics::set_structured_buffer(&particles_buffer_z, 4);
-
-                int32_t grid_z = (NUM_PARTICLES / 100) / THREAD_GROUP_SIZE;
-                graphics::run_compute(10, 10, grid_z);
-                graphics::unset_texture_compute(0);
-
-                graphics::set_compute_shader(&blit_compute_shader);
-                graphics::set_texture_compute(&display_tex_uint, 0);
-                graphics::set_texture_compute(&display_tex, 1);
-                graphics::run_compute(window_width, window_height, 1);
-                graphics::unset_texture_compute(0);
-                graphics::unset_texture_compute(1);
 
                 graphics::set_vertex_shader(&vertex_shader_2d);
                 graphics::set_pixel_shader(&pixel_shader_2d);
@@ -1258,7 +1179,7 @@ int main(int argc, char **argv)
                     rendering_config.pt_iteration = 0;
                 }
                 graphics::update_constant_buffer(&rendering_settings_buffer, &rendering_config);
-                if (run_pt && rendering_config.pt_iteration < 1e5) {
+                if (run_pt && rendering_config.pt_iteration < 1e5 && graphics::is_ready(&cs_volpath)) {
                     graphics::set_compute_shader(&cs_volpath);
                     graphics::set_texture_compute(&display_tex, 0);
                     graphics::set_texture_sampled_compute(&trace_tex, 1);
@@ -1444,7 +1365,7 @@ int main(int argc, char **argv)
         if (is_running && make_screenshot) {
             uint32_t frame_number = graphics::capture_current_frame();
             std::stringstream stream;
-	        stream << "capture\\frame" << frame_number;
+	        stream << "capture/frame" << frame_number;
             graphics::save_texture2D_HDR(&display_tex, stream.str());
             make_screenshot = false;
         }
@@ -1633,6 +1554,8 @@ int main(int argc, char **argv)
     graphics::release(&ps_volume_overdensity);
     graphics::release(&ps_volume_highlight);
     graphics::release(&ps_volume_halocolor);
+    graphics::release(&ps_volume_velocity);
+    graphics::release(&ps_volpath);
     graphics::release(&vertex_shader);
     graphics::release(&pixel_shader_2d);
     graphics::release(&vertex_shader_2d);
@@ -1642,6 +1565,7 @@ int main(int argc, char **argv)
     graphics::release(&sort_shader);
     graphics::release(&decay_compute_shader);
     graphics::release(&cs_density_histo);
+    graphics::release(&cs_volpath);
     graphics::release(&quad_mesh);
     graphics::release(&super_quad_mesh);
     graphics::release(&trail_tex_A);
@@ -1653,6 +1577,7 @@ int main(int argc, char **argv)
     graphics::release(&palette_data_tex);
     graphics::release(&tex_sampler_trace);
     graphics::release(&tex_sampler_deposit);
+    graphics::release(&tex_sampler_display);
     graphics::release(&tex_sampler_color_palette);
     graphics::release(&config_buffer);
     graphics::release(&particles_buffer_x);
