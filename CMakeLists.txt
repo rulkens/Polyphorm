@@ -123,3 +123,20 @@ target_include_directories(shader_compile_tests PRIVATE ${CMAKE_SOURCE_DIR}/cppl
 target_link_libraries(shader_compile_tests PRIVATE webgpu_dawn webgpu_glfw glfw)
 target_compile_options(shader_compile_tests PRIVATE -UNDEBUG)
 add_test(NAME shader_compile_tests COMMAND shader_compile_tests)
+
+add_executable(sim_kernel_tests
+  tests/sim_kernel_tests.cpp
+  cpplib/graphics.cpp
+  cpplib/file_system.cpp
+  cpplib/gpu/gpu_context.cpp
+  cpplib/platform.cpp
+  cpplib/input.cpp
+  cpplib/logging.cpp
+)
+target_compile_features(sim_kernel_tests PRIVATE cxx_std_17)
+target_compile_definitions(sim_kernel_tests PRIVATE
+  SHADER_DIR="${CMAKE_SOURCE_DIR}/shaders")
+target_include_directories(sim_kernel_tests PRIVATE ${CMAKE_SOURCE_DIR}/cpplib)
+target_link_libraries(sim_kernel_tests PRIVATE webgpu_dawn webgpu_glfw glfw)
+target_compile_options(sim_kernel_tests PRIVATE -UNDEBUG)
+add_test(NAME sim_kernel_tests COMMAND sim_kernel_tests)
