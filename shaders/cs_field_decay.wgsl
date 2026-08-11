@@ -44,9 +44,15 @@ override QUIRK_DECAY_WEIGHT_ALL_INT3: bool = true;
 //   d == -1 the result is -1, not world_dim-1. The field is therefore
 //   periodic on the HIGH side (world_dim % world_dim == 0) and absorbing on
 //   the LOW side: the negative coordinate falls out of bounds and the load
-//   returns 0. D3D11 typed-UAV OOB loads return 0 and WGSL guarantees
-//   textureLoad on an invalid texel address returns the zero value, so this
-//   asymmetry ports literally with no emulation.
+//   returns 0. D3D11 typed-UAV OOB loads return 0.
+//   CORRECTION (Task 4, see QUIRK(oob_load_zero_emulation) near load_oob_zero
+//   below): WGSL does NOT guarantee a zero-returning OOB textureLoad — the
+//   spec permits EITHER zero OR data from an arbitrary in-bounds texel, and
+//   Task 4's GPU micro-tests measured this Dawn/Metal build actually
+//   returning the latter (clamped to the far edge), which would have
+//   silently broken this asymmetry. The bare-textureLoad "no emulation
+//   needed" claim below was therefore WRONG; load_oob_zero() now performs
+//   the emulation explicitly so the asymmetry described here actually holds.
 //   Net effect: mass leaks out of the x=0 / y=0 / z=0 faces and re-enters at
 //   the opposite faces. Also note the denominator `w` does NOT compensate —
 //   it always sums 23.6188, so boundary voxels are additionally darkened.
@@ -196,6 +202,30 @@ override WG_X: u32 = 8u;
 override WG_Y: u32 = 8u;
 override WG_Z: u32 = 8u;
 
+// QUIRK(oob_load_zero_emulation): D3D11 guarantees OOB typed-UAV loads return 0;
+// WGSL only PERMITS zero and this Dawn/Metal build clamps to edge (measured, see
+// .superpowers task-4 report / m2a-carryovers). Explicit guard restores D3D11 semantics.
+//   The WGSL spec (textureLoad, "Out-of-bounds" clause) allows an
+//   out-of-range logical texel address to return EITHER the zero value OR
+//   "the data for some texel within bounds of the texture" — implementation's
+//   choice. Task 4's GPU micro-tests measured this Dawn build's actual choice
+//   to be clamp-to-edge, not zero-fill, which silently breaks the
+//   QUIRK(nonperiodic_low_boundary) parity below (the low-boundary darkening
+//   that translation-notes.md §7.9 derives, and that the published SDSS VAC
+//   cube was fitted against, depends on OOB loads reading 0). This helper
+//   makes the zero-fill explicit instead of relying on unspecified hardware
+//   behaviour. Only tex_in's .x channel is ever consumed by callers, so the
+//   unused .yzw lanes of the zero-fill vector are inert; (0,0,0,0) vs
+//   (0,0,0,1) — the alpha convention D3D11 typed-UAV zero-fills use — is
+//   unobservable here either way, so plain vec4<f32>(0.0) is used.
+fn load_oob_zero(coord: vec3<i32>) -> vec4<f32> {
+    if (all(coord >= vec3<i32>(0)) &&
+        coord.x < cfg.world_width && coord.y < cfg.world_height && coord.z < cfg.world_depth) {
+        return textureLoad(tex_in, coord);
+    }
+    return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+}
+
 @compute @workgroup_size(WG_X, WG_Y, WG_Z)
 fn main(
     // HLSL:58-59 also declare SV_GroupThreadID and SV_GroupID; both are unused
@@ -262,8 +292,10 @@ fn main(
                 //   r32float load yields (r, 0, 0, 1); .xy == (r, 0) matches
                 //   the D3D11 half2-on-R16_FLOAT result exactly.
                 //   Out-of-bounds (negative txcoord) -> zero vector, matching
-                //   D3D11 typed-UAV OOB load behaviour.
-                let val = textureLoad(tex_in, txcoord).xy;              // HLSL:74
+                //   D3D11 typed-UAV OOB load behaviour. QUIRK(oob_load_zero_emulation):
+                //   explicit guard (see load_oob_zero above) — WGSL/this Dawn build
+                //   does NOT do this for us on a bare textureLoad.
+                let val = load_oob_zero(txcoord).xy;                    // HLSL:74
                 v = v + weight * val;                                   // HLSL:75
                 w = w + weight;                                         // HLSL:76
             }

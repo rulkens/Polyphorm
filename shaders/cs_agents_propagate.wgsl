@@ -217,6 +217,40 @@ fn mod_floor(x: f32, y: f32) -> f32 {
     return x - y * floor(x / y);                                        // HLSL:78
 }
 
+// QUIRK(oob_load_zero_emulation): D3D11 guarantees OOB typed-UAV loads return 0;
+// WGSL only PERMITS zero and this Dawn/Metal build clamps to edge (measured, see
+// .superpowers task-4 report / m2a-carryovers). Explicit guard restores D3D11 semantics.
+//   Companion to the identical helper in cs_field_decay.wgsl, split in two
+//   here because tex_deposit and tex_trace are different bindings. Guards
+//   every LOAD whose coordinate can leave the grid: the sensing rays
+//   (QUIRK(nonperiodic_sensing) is explicitly non-wrapping, so an agent
+//   sensing near an edge routinely constructs an out-of-range coordinate),
+//   the dead current_deposit read, and the post-move reads whose coordinate
+//   comes from mod_floor (normally in-range, but HLSL:220-223's own comment
+//   flags the residual f32 rounding hazard that can land it exactly on the
+//   grid dimension). Store call sites are UNCHANGED — Task 4 measured OOB
+//   textureStore as correctly discarded on this build/spec (a hard "will not
+//   be executed" guarantee, unlike textureLoad's OOB fallback), so no
+//   emulation is needed there. Only .x (deposit)/.x (trace, single-channel
+//   r32float — see QUIRK(r16f_channel_truncation)) is ever consumed by
+//   callers, so the zero-fill's unused lanes are inert; plain vec4<f32>(0.0)
+//   is used (see cs_field_decay.wgsl's load_oob_zero for the same note).
+fn load_deposit_oob_zero(coord: vec3<i32>) -> vec4<f32> {
+    if (all(coord >= vec3<i32>(0)) &&
+        coord.x < cfg.world_width && coord.y < cfg.world_height && coord.z < cfg.world_depth) {
+        return textureLoad(tex_deposit, coord);
+    }
+    return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+}
+
+fn load_trace_oob_zero(coord: vec3<i32>) -> vec4<f32> {
+    if (all(coord >= vec3<i32>(0)) &&
+        coord.x < cfg.world_width && coord.y < cfg.world_height && coord.z < cfg.world_depth) {
+        return textureLoad(tex_trace, coord);
+    }
+    return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+}
+
 // HLSL:81-84
 const DIR_SAMPLE_POINTS: i32 = 8;      // unused (only the dead naive sampler used it)
 const PI: f32     = 3.141592;          // NOTE: the original's truncated PI, kept verbatim
@@ -311,6 +345,15 @@ fn main(
             //   texture has no second channel, so `color` is discarded by the
             //   hardware. Kept so the VELOCITY/HALO_COLOR regimes only need a
             //   format widening, not a code change.
+            // NOT wrapped with load_deposit_oob_zero (QUIRK(oob_load_zero_emulation)
+            // deliberately not applied here): `c` is unwrapped raw position (this is
+            // exactly Task 4 Test B's OOB case, e.g. c.x == world_width). `prev` only
+            // ever feeds `sum`, which only ever feeds the textureStore on the SAME
+            // coordinate `c` immediately below — and Task 4 measured that store as
+            // unconditionally discarded on this build/spec when `c` is OOB (hard
+            // "will not be executed" guarantee). So whatever garbage-vs-zero `prev`
+            // reads in the OOB case is provably dead: it can never reach memory.
+            // Guarding it would be inert defensive cost with no behavioural effect.
             let c = vec3<u32>(vec3<f32>(x, y, z));
             let prev = textureLoad(tex_deposit, c).xy;   // r32float -> (r, 0)
             let sum = prev + vec2<f32>(deposit, color * deposit);
@@ -355,21 +398,31 @@ fn main(
     if (QUIRK_DEAD_CURRENT_DEPOSIT_READ) {
         // QUIRK(dead_current_deposit_read): kept for VAC parity
         // HLSL:138 — value is discarded; HLSL:230 recomputes it.
-        _ = textureLoad(tex_deposit, p).x;
+        // Guarded (QUIRK(oob_load_zero_emulation)): `p` is this invocation's
+        // PRE-move position, normally in-range but per HLSL:220-223's own
+        // comment can round to exactly the grid dimension from a PRIOR
+        // iteration's mod_floor. The read result is unused either way (that's
+        // the point of this quirk), but the load itself must still be a
+        // spec/D3D11-shaped OOB access, not a stray in-bounds memory read.
+        _ = load_deposit_oob_zero(p).x;
     }
 
     let center_sense_pos = center_axis * sense_distance_prob;           // HLSL:139
     // QUIRK(nonperiodic_sensing): kept for VAC parity
     //   Sensing does NOT wrap (unlike movement, HLSL:221-223). Coordinates
     //   outside the grid fall through to the OOB path. D3D11 typed-UAV OOB
-    //   loads return 0; WGSL guarantees textureLoad on an invalid texel
-    //   address returns the zero value — the two agree exactly, which is
-    //   what makes this quirk portable at all.
+    //   loads return 0. WGSL's textureLoad OOB fallback is only PERMITTED to
+    //   be zero (spec: "the data for some texel within bounds of the
+    //   texture" is an equally legal choice) — Task 4 measured this Dawn/
+    //   Metal build actually clamping to an in-bounds texel instead of
+    //   zero-filling. QUIRK(oob_load_zero_emulation): both sensing loads
+    //   below are explicitly guarded with load_deposit_oob_zero to restore
+    //   the D3D11-parity zero-fill this quirk's portability claim depends on.
     var deposit_ahead: f32;
     if (QUIRK_INT3_TRUNCATED_SENSING) {
-        deposit_ahead = textureLoad(tex_deposit, p + vec3<i32>(center_sense_pos)).x; // HLSL:140
+        deposit_ahead = load_deposit_oob_zero(p + vec3<i32>(center_sense_pos)).x; // HLSL:140
     } else {
-        deposit_ahead = textureLoad(tex_deposit, p + vec3<i32>(round(center_sense_pos))).x;
+        deposit_ahead = load_deposit_oob_zero(p + vec3<i32>(round(center_sense_pos))).x;
     }
 
     // HLSL:142-145  Stochastic MC direction sampling.  RNG DRAW #3.
@@ -378,9 +431,9 @@ fn main(
                      * sense_distance_prob;                             // HLSL:144
     var sense_deposit: f32;
     if (QUIRK_INT3_TRUNCATED_SENSING) {
-        sense_deposit = textureLoad(tex_deposit, p + vec3<i32>(sense_offset)).x;     // HLSL:145
+        sense_deposit = load_deposit_oob_zero(p + vec3<i32>(sense_offset)).x;     // HLSL:145
     } else {
-        sense_deposit = textureLoad(tex_deposit, p + vec3<i32>(round(sense_offset))).x;
+        sense_deposit = load_deposit_oob_zero(p + vec3<i32>(round(sense_offset))).x;
     }
 
     let sharpness = cfg.move_sense_coef;                                // HLSL:146
@@ -496,7 +549,15 @@ fn main(
     let thr_f = 0.05 * n_agents_M * cfg.deposit_value
               + 0.1e-3 * n_agents_M;                                    // HLSL:229
 
-    let current_deposit = textureLoad(tex_deposit, vec3<u32>(vec3<f32>(x, y, z))).x; // HLSL:230
+    // Guarded (QUIRK(oob_load_zero_emulation)): x/y/z were just mod_floor'd
+    // above and are normally in [0, dim), but HLSL:220-223's own comment
+    // flags the residual f32 rounding hazard that can land this exactly on
+    // the grid dimension (one past the last valid index) — see Task 4's
+    // sim_kernel_tests.cpp Test B, which exercises precisely this class of
+    // edge coordinate (via the data-point path, not this one) and confirms
+    // the store side discards cleanly; this load side needs the explicit
+    // zero-fill guard since textureLoad's OOB fallback is not.
+    let current_deposit = load_deposit_oob_zero(vec3<i32>(vec3<f32>(x, y, z))).x; // HLSL:230
     particle_weight = w_f * particle_weight + (1.0 - w_f) * current_deposit;         // HLSL:231
 
     if (AGENT_REROUTING) {                                              // HLSL:232
@@ -529,7 +590,13 @@ fn main(
     //   invocation already read at HLSL:230 — the value read there is stale
     //   with respect to concurrent writers, by design.
     {
-        let prev = textureLoad(tex_deposit, wc).xy;
+        // Guarded read (QUIRK(oob_load_zero_emulation), same f32-rounding
+        // hazard as HLSL:230 above — `wc` is derived from the same
+        // post-mod_floor x/y/z). The store on the next line is UNCHANGED:
+        // Task 4 measured OOB textureStore as correctly/unconditionally
+        // discarded on this build, so `wc` itself needs no guard, only the
+        // load that feeds `sum`.
+        let prev = load_deposit_oob_zero(vec3<i32>(wc)).xy;
         let sum = prev + vec2<f32>(cfg.deposit_value, 0.0);
         textureStore(tex_deposit, wc, vec4<f32>(sum, 0.0, 0.0));
     }
@@ -548,7 +615,11 @@ fn main(
     //   to 1.0 at main.cpp:803 (the adaptive update at main.cpp:1315 is
     //   commented out), so this reduces to a bare distance weighting.
     {
-        let prev = textureLoad(tex_trace, wc);
+        // Guarded read (QUIRK(oob_load_zero_emulation), same rationale as the
+        // tex_deposit RMW above — trace's own binding, hence the separate
+        // load_trace_oob_zero helper). Store is UNCHANGED for the same
+        // discard-verified-by-Task-4 reason.
+        let prev = load_trace_oob_zero(vec3<i32>(wc));
         let add = vec4<f32>(
             (1.0 / cfg.normalization_factor) * distance_scaling_factor,
             abs(center_axis.x), abs(center_axis.y), abs(center_axis.z));
