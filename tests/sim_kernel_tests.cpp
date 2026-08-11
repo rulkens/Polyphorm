@@ -111,37 +111,27 @@ int main() {
     //   x=W-1 face (15,8,8): the high side wraps (p % W == 0 for p == W) -> all
     //     27 taps present -> 1.0 * DECAY
     //
-    // FINDING (see the DIAGNOSTIC block below, which measures this directly):
-    // that "returns zero" assumption — stated as a hard guarantee in
-    // cs_field_decay.wgsl's QUIRK(nonperiodic_low_boundary) comment and in
-    // translation-notes.md §7.9 ("WGSL guarantees textureLoad on an invalid
-    // texel address returns the zero value") — is FALSE. The current W3C WGSL
-    // spec (17.7.4 textureLoad, "Out-of-bounds" clause) states an invalid
-    // logical texel address makes the built-in return ONE OF: (a) the zero
-    // vector, OR (b) "the data for some texel within bounds of the texture" —
-    // implementation's choice, unspecified which. It is NOT a zero guarantee.
-    // (Contrast textureStore, Test B below: for stores, an invalid address is
-    // a hard "will not be executed" per spec — that half of the assumption
-    // DOES hold, and Test B pins it.)
+    // BACKGROUND: the "returns zero" assumption above is not a WGSL guarantee.
+    // The W3C WGSL spec (17.7.4 textureLoad, "Out-of-bounds" clause) permits
+    // an invalid logical texel address to make the built-in return EITHER the
+    // zero vector OR "the data for some texel within bounds of the texture" —
+    // implementation's choice. (Contrast textureStore, Test B below: for
+    // stores, an invalid address is a hard "will not be executed" per spec —
+    // no implementation choice there, and Test B pins it directly.) The
+    // DIAGNOSTIC block right below measures which choice this Dawn/Metal
+    // build actually makes for a bare textureLoad: it clamps to the far edge,
+    // not zero — verified with x=-1, x=-100, and x=16 against a texture with
+    // distinct markers at x=0 and x=W-1 (all three return the x=W-1 marker).
     //
-    // On the pinned Dawn build (v20260807.193620) / Metal backend this test
-    // suite runs on, the measured choice is: OOB coordinates on ANY axis, in
-    // EITHER direction, clamp to the texture's highest valid index on that
-    // axis (verified with x=-1, x=-100, and x=16 against a texture with
-    // distinct markers at x=0 and x=W-1 — all three return the x=W-1 marker,
-    // not the x=0 marker, and not zero). This is spec-legal but is NOT the
-    // D3D11-parity behaviour the shader's own comments assume, so the boundary
-    // face values below deviate from the brief's derived math on this
-    // hardware. Per the task's instructions this is investigated (see the
-    // diagnostic evidence), and is neither a shader logic bug nor a test
-    // harness bug — it is a genuine WGSL-portability gap in Task 3's shader
-    // that only this kind of raw-voxel probe can surface. The assertion below
-    // is therefore LEFT AS THE BRIEF SPECIFIES (unweakened, tolerance 1e-5)
-    // and is expected to FAIL on this hardware/Dawn build; see the task
-    // report for the BLOCKED writeup. Loosening it or reshaping it to match
-    // today's observed clamp would just pin an unspecified, non-portable
-    // implementation choice that spec-conformant Dawn/Metal updates are free
-    // to change out from under us.
+    // Historical note: before commit f9903c9 added the QUIRK(oob_load_zero_emulation)
+    // guard (load_oob_zero(), cs_field_decay.wgsl), this Dawn/Metal clamp
+    // behaviour leaked straight through into cs_field_decay.wgsl's bare
+    // textureLoad and the x=0 face assertion below failed, measuring 0.9 (the
+    // uniform fill value with no boundary attenuation) instead of the derived
+    // 0.6905262 * DECAY. The guard makes the zero-fill explicit instead of
+    // relying on the (here, wrong) hardware default, restoring D3D11
+    // OOB-load-zero semantics — the values derived above, and asserted below,
+    // now hold as measured.
     // =========================================================================
     {
         const int W = 16;
@@ -219,15 +209,10 @@ int main() {
                vals[2], 1.0f * DECAY);
 
         assert(approx(vals[0], 1.0f * DECAY, 1e-5f));
-        // EXPECTED TO FAIL on this hardware/Dawn build — see the FINDING in
-        // this block's header comment and the DIAGNOSTIC probe above. Kept
-        // exactly as the brief derives it (unweakened, 1e-5 tolerance): the
-        // measured x=0 face value does not match because textureLoad's
-        // out-of-bounds fallback is spec-implementation-defined, not
-        // guaranteed-zero, and this Dawn/Metal build's choice (clamp to the
-        // far edge) differs from the zero-fill the shader's own quirk
-        // documentation assumes. NOT loosened per task instructions; see the
-        // task report for the BLOCKED writeup.
+        // Historical note: before f9903c9 added QUIRK(oob_load_zero_emulation)
+        // guards, this assertion failed on Dawn/Metal (OOB loads clamped to
+        // edge, measuring 0.9 at the x=0 face); the guard restores D3D11
+        // OOB-load-zero semantics and the derived values below now hold.
         assert(approx(vals[1], 0.6905262f * DECAY, 1e-5f));
         assert(approx(vals[2], 1.0f * DECAY, 1e-5f));
         printf("sim_kernel_tests: Test A (decay boundary quirks D2/D4/D5/A4) passed\n");
