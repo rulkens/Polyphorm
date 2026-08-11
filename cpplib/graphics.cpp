@@ -991,10 +991,14 @@ void run_compute(int gx, int gy, int gz) {
     ensure_encoder();
 
     // Group 0: uniform at binding 0, if the shader declares one.
-    // Group 1: every currently-bound slot. CONTRACT: the bound slot set must
-    // exactly match the shader's @group(1) declarations — extra or missing
-    // entries are a Dawn validation error (which names the binding; that is
-    // the intended failure mode, better than D3D11's silent null reads).
+    // Group 1: every currently-bound resource slot (g_compute_slots, binding
+    // == slot) PLUS every currently-bound sampler slot (g_compute_samplers,
+    // binding == MAX_SLOTS + slot = 16 + N — DESIGN §6.3, set alongside
+    // resource entries in the two loops below). CONTRACT: the union of both
+    // bound sets must exactly match the shader's @group(1) declarations —
+    // extra or missing entries in either array are a Dawn validation error
+    // (which names the binding; that is the intended failure mode, better
+    // than D3D11's silent null reads).
     wgpu::BindGroup group0;
     if (g_compute_shader->uses_group0) {
         if (!g_uniform_buffer) {
