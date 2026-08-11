@@ -141,3 +141,15 @@ target_include_directories(sim_kernel_tests PRIVATE ${CMAKE_SOURCE_DIR}/cpplib)
 target_link_libraries(sim_kernel_tests PRIVATE webgpu_dawn webgpu_glfw glfw)
 target_compile_options(sim_kernel_tests PRIVATE -UNDEBUG)
 add_test(NAME sim_kernel_tests COMMAND sim_kernel_tests)
+
+# M2b acceptance test: generate a synthetic dataset, run the real polyphorm
+# binary headless for 400 iterations, and assert the trace-histogram mean
+# energy at data points rose (main.cpp's --headless exit code IS the check).
+add_executable(gen_test_dataset tests/gen_test_dataset.cpp)
+
+add_test(NAME energy_smoke
+  COMMAND ${CMAKE_COMMAND}
+    -DGEN=$<TARGET_FILE:gen_test_dataset>
+    -DAPP=$<TARGET_FILE:polyphorm>
+    -P ${CMAKE_SOURCE_DIR}/tests/run_energy_smoke.cmake)
+set_tests_properties(energy_smoke PROPERTIES TIMEOUT 300)

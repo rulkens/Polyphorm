@@ -84,6 +84,16 @@ fn main(@builtin(local_invocation_index) thread_index: u32,
     var x = particles_x[idx];
     var y = particles_y[idx];
     var z = particles_z[idx];
+    // QUIRK(dead_mass_read): upstream HLSL reads mass here (`float mass =
+    // particles_weights[idx];`) then never uses it (the `density /= mass`
+    // normalization is commented out there too). The read is preserved
+    // verbatim: Dawn/Tint derive the auto compute bind group layout from
+    // resources actually referenced in the entry point, so dropping this
+    // access silently drops binding 5 from the layout and main.cpp's
+    // set_structured_buffer(&particles_buffer_weights, 5) then fails
+    // CreateBindGroup ("binding index 5 not present in the bind group
+    // layout") — found while wiring up the M2b headless energy_smoke test.
+    _ = particles_weights[idx];
 
     if (cfg.sample_randomly != 0) {
         var rng: RNG;

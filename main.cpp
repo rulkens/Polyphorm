@@ -9,6 +9,8 @@
 #include <cassert>
 #include "logging.h"
 #include <cstddef>
+#include <cstring>
+#include <cstdlib>
 #include <sstream>
 #include <fstream>
 
@@ -344,6 +346,18 @@ uint32_t quad_vertices_count = 6;
 
 int main(int argc, char **argv)
 {
+    // M2b: --headless N runs N simulation iterations with no window/UI/rendering
+    // and exits 0 iff the trace-histogram mean energy at data points rose;
+    // --dataset <path> overrides the compiled-in DATASET_NAME (used by the
+    // energy_smoke ctest to point at a generated synthetic catalog).
+    int headless_frames = 0;   // 0 = windowed
+    const char *dataset_override = NULL;
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--headless") == 0 && i + 1 < argc) headless_frames = atoi(argv[i + 1]);
+        if (strcmp(argv[i], "--dataset") == 0 && i + 1 < argc) dataset_override = argv[i + 1];
+    }
+    const bool headless = headless_frames > 0;
+
     // Load configuration file
     std::ifstream config_file;
     config_file.open("config.polyp", std::ofstream::in);
@@ -366,12 +380,15 @@ int main(int argc, char **argv)
 
     // Window setup
     uint32_t window_width = SCREEN_X, window_height = SCREEN_Y;
- 	Window window = platform::get_window("Space Physarum", window_width, window_height);
-    assert(platform::is_window_valid(&window));
+    Window window = {};
+    if (!headless) {
+        window = platform::get_window("Space Physarum", window_width, window_height);
+        assert(platform::is_window_valid(&window));
+    }
 
     // Data setup
         // Load dataset description from metafile
-    std::string filename(DATASET_NAME);
+    std::string filename(dataset_override ? dataset_override : DATASET_NAME);
     std::ifstream metadata_file;
     metadata_file.open((filename + "_metadata.txt").c_str(), std::ofstream::in);
     if (!metadata_file.good()) {
@@ -443,18 +460,22 @@ int main(int argc, char **argv)
     // Init graphics
     printf("\nInitializing graphics...\n");
     graphics::init();
-    graphics::init_swap_chain(&window);
+    RenderTarget render_target_window = {};
+    DepthBuffer depth_buffer = {};
+    if (!headless) {
+        graphics::init_swap_chain(&window);
 
-    // M4: font::init returns with ImGui
-    ui::init((float)window_width, (float)window_height);
-    ui::set_input_responsive(true);
+        // M4: font::init returns with ImGui
+        ui::init((float)window_width, (float)window_height);
+        ui::set_input_responsive(true);
 
-    // Create window render target
-	RenderTarget render_target_window = graphics::get_render_target_window();
-    assert(graphics::is_ready(&render_target_window));
-    DepthBuffer depth_buffer = graphics::get_depth_buffer(window_width, window_height);
-    assert(graphics::is_ready(&depth_buffer));
-    graphics::set_render_targets_viewport(&render_target_window);
+        // Create window render target
+        render_target_window = graphics::get_render_target_window();
+        assert(graphics::is_ready(&render_target_window));
+        depth_buffer = graphics::get_depth_buffer(window_width, window_height);
+        assert(graphics::is_ready(&depth_buffer));
+        graphics::set_render_targets_viewport(&render_target_window);
+    }
 
     // M2b: only the simulation kernels are ported to WGSL. Render-path
     // shaders return in M3 (particles) and M4 (volume/PT).
@@ -764,17 +785,24 @@ int main(int argc, char **argv)
     bool capture_screen = false;
     bool make_screenshot = false;
     bool capture_agents = false;
-    bool compute_histogram = true;
+    bool compute_histogram = true;   // headless energy verdict (below) requires this to stay on.
+    if (headless) assert(compute_histogram);
     bool run_pt = true;
     bool reset_pt = false;
     bool sort_agents = false;
     float background_color = 0.0;
     VisualizationMode vis_mode = VisualizationMode::VM_PARTICLES;
 
+    // Headless acceptance: mean trace energy at data points must rise (read after the loop).
+    float e_first = -1.0f;
+    float e_last = 0.0f;
+
     while(is_running)
     {
         static float sec_per_frame_amortized = 0.0;
         sec_per_frame_amortized = 0.9 * sec_per_frame_amortized + 0.1 * timer::checkpoint(&timer);
+
+      if (!headless) {
         std::ostringstream window_title;
         window_title.precision(3);
         window_title << "Polyphorm [ " << 1000.0 * sec_per_frame_amortized << " ms/frame";
@@ -783,7 +811,7 @@ int main(int argc, char **argv)
             window_title << " | " << rendering_config.pt_iteration << " spp";
         window_title << " ]";
         platform::set_window_title(window, window_title.str().c_str());
-        
+
         // Event loop
         input::reset();
         Event event;
@@ -900,6 +928,9 @@ int main(int argc, char **argv)
                 make_screenshot = true;
             }
         }
+      } else {
+        if (simulation_config.n_iteration >= headless_frames) is_running = false;
+      }
 
         // Update simulation config
         graphics::update_constant_buffer(&config_buffer, &simulation_config);
@@ -1095,6 +1126,7 @@ int main(int argc, char **argv)
         }
 
         // Rendering
+        if (!headless)
         {
             graphics::set_render_targets_viewport(&render_target_window);
             graphics::clear_render_target(&render_target_window, background_color, background_color, background_color, 1.0);
@@ -1224,7 +1256,8 @@ int main(int argc, char **argv)
                 norm_coef += float(density_histogram[b]);
                 energy += float(density_histogram[b]) * math::pow(HISTOGRAM_BASE, b-6);
             }
-            float mean = energy / norm_coef;
+            float energy_mean_this_frame = energy / norm_coef;
+            float mean = energy_mean_this_frame;
             float variance = float(density_histogram[0]) * math::square(-mean);
             for (int b = 1; b < N_HISTOGRAM_BINS-1; b++) {
                 variance += float(density_histogram[b]) * math::square(math::pow(HISTOGRAM_BASE, b-6) - mean);
@@ -1234,6 +1267,13 @@ int main(int argc, char **argv)
             // const float smoothing_coef = 0.5;
             // simulation_config.normalization_factor = smoothing_coef * simulation_config.normalization_factor + (1.0 - smoothing_coef) * mean;
 
+            // Headless acceptance: mean trace energy at data points must rise (skip warmup).
+            e_first = (e_first < 0.0f && simulation_config.n_iteration >= 10) ? energy_mean_this_frame : e_first;
+            e_last = energy_mean_this_frame;
+            if (headless && simulation_config.n_iteration % 50 == 0)
+                printf("[headless] iteration %d  E = %f\n", simulation_config.n_iteration, energy_mean_this_frame);
+
+          if (!headless) {
             graphics::set_render_targets_viewport(&render_target_window);
 
             // Draw histogram
@@ -1358,22 +1398,23 @@ int main(int argc, char **argv)
             ui::draw_text("X", Vector2(trim_params.x - trim_params.z - 10.0, trim_params.y - 0.52 * trim_params.z), label_color);
 
             ui::end();
+          }
         }
 
         // Frame capturing
-        if (is_running && make_screenshot) {
+        if (!headless && is_running && make_screenshot) {
             uint32_t frame_number = graphics::capture_current_frame();
             std::stringstream stream;
 	        stream << "capture/frame" << frame_number;
             graphics::save_texture2D_HDR(&display_tex, stream.str());
             make_screenshot = false;
         }
-        if (is_running && capture_screen) {
+        if (!headless && is_running && capture_screen) {
             graphics::capture_current_frame();
         }
 
         // UI
-        if (show_ui) {
+        if (!headless && show_ui) {
             graphics::set_render_targets_viewport(&render_target_window);
 
             Panel panel = ui::start_panel("", Vector2(0.0, 0.0), 1.0);
@@ -1543,10 +1584,20 @@ int main(int argc, char **argv)
         if (run_mold) {
             ++simulation_config.n_iteration;
         }
-        graphics::swap_frames();
+        if (!headless) graphics::swap_frames();
+        // else: no swap chain to present to. capture_structured_buffer() in the
+        // histogram statistics block above already forces a command-queue flush
+        // every frame (verified empirically: the [headless] printf every 50
+        // iterations shows n_iteration progressing and E changing frame to frame).
     }
 
-    ui::release();
+    if (headless) {
+        printf("[headless] E first=%f last=%f -> %s\n", e_first, e_last,
+               (e_last > e_first * 1.05f) ? "ENERGY RISING" : "ENERGY NOT RISING");
+        if (!(e_last > e_first * 1.05f)) { return 1; }
+    }
+
+    if (!headless) ui::release();
     graphics::release(&render_target_window);
     graphics::release(&depth_buffer);
     graphics::release(&pixel_shader);
