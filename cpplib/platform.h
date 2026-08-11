@@ -113,6 +113,16 @@ namespace platform
 	// by ui::init for ImGui_ImplGlfw_InitForOther (M4a design §4.1).
 	GLFWwindow *get_glfw_window();
 
+	// Poll the window's current logical size (points) and framebuffer size
+	// (pixels; 2x logical on Retina displays). GLFW updates both
+	// synchronously once events have been pumped (platform::get_event does
+	// that), so main.cpp can just call this once per frame and compare
+	// against its last-known size to detect a resize — no resize callback
+	// needed (M4a Task 2b: window resize support). No-op (all outputs 0) if
+	// the window is invalid.
+	void get_window_size(Window *window, uint32_t *out_logical_w, uint32_t *out_logical_h,
+	                     uint32_t *out_fb_w, uint32_t *out_fb_h);
+
 	// Get next Event, should be called per frame until false is returned
 	bool get_event(Event *event);
 

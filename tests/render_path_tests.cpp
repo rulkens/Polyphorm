@@ -727,6 +727,115 @@ static void test_compute_sampler_pairing() {
     graphics::release(&tex);
 }
 
+// ---- Test 6 (M4a Task 2b): resize cycle on offscreen resources ----
+//
+// The window-surface Configure path itself isn't headless-testable (no real
+// window/surface in this binary — verified manually at the Task 3 human
+// gate instead). What IS pinned here, headlessly, is everything main.cpp
+// does AROUND that Configure call on a resize: release the old display_tex/
+// display_accum_buffer/render-target-sized resources, create fresh ones at
+// a DIFFERENT size, and keep drawing/dispatching through the SAME cached
+// render pipeline (draw_mesh's g_pipeline_cache, keyed on vs/ps/blend/
+// stride/format/topology -- deliberately NOT on texture dimensions) and the
+// SAME cached clear-kernel compute pipeline (graphics.cpp's
+// ensure_clear_kernel/g_clear2d_f, exercised via clear_texture). Chosen size
+// B is both LARGER and a different aspect ratio than size A, so a silently
+// stale (wrong-size) resource would surface as a Dawn validation error
+// (e.g. CopyTextureToBuffer's extent exceeding the actual texture extent)
+// inside the PushErrorScope/PopErrorScope bracket below, not just a wrong
+// pixel value.
+static void run_resize_cycle_pass(graphics::VertexShader *vs, graphics::PixelShader *ps,
+                                  graphics::Mesh *quad, uint32_t w, uint32_t h,
+                                  float clear_value) {
+    graphics::StructuredBuffer accum = graphics::get_structured_buffer(sizeof(uint32_t), w * h);
+    assert(graphics::is_ready(&accum));
+    graphics::Texture2D display_tex =
+        graphics::get_texture2D(nullptr, w, h, graphics::Format::RGBA32_FLOAT, 16);
+    assert(graphics::is_ready(&display_tex));
+    graphics::RenderTarget rt = graphics::get_render_target(w, h, graphics::Format::RGBA32_FLOAT);
+    assert(graphics::is_ready(&rt));
+    graphics::TextureSampler samp = graphics::get_texture_sampler();
+    assert(graphics::is_ready(&samp));
+
+    bool had_error = false, popped = false;
+    graphics_context->device.PushErrorScope(wgpu::ErrorFilter::Validation);
+
+    graphics::clear_structured_buffer(&accum);            // mirrors main.cpp's per-frame accum clear
+    graphics::clear_texture(&display_tex, clear_value);   // reuses the cached g_clear2d_f pipeline
+
+    graphics::set_render_targets_viewport(&rt);
+    graphics::clear_render_target(&rt, 0.0f, 0.0f, 0.0f, 1.0f);
+    graphics::set_vertex_shader(vs);
+    graphics::set_pixel_shader(ps);
+    graphics::set_texture(&display_tex, 0);
+    graphics::set_texture_sampler(&samp, 0);
+    graphics::set_blend_state(graphics::BlendType::OPAQUE);
+    graphics::draw_mesh(quad);                            // reuses the cached render pipeline
+    graphics::unset_texture(0);
+    graphics::swap_frames();
+
+    std::vector<float> pixels((size_t)w * h * 4);
+    readback_rgba32f(&rt, w, h, pixels.data());   // OOB CopyTextureToBuffer if rt were stale-sized
+
+    graphics_context->device.PopErrorScope(
+        wgpu::CallbackMode::AllowProcessEvents,
+        [&had_error, &popped, w, h](wgpu::PopErrorScopeStatus, wgpu::ErrorType type,
+                                    wgpu::StringView message) {
+            if (type != wgpu::ErrorType::NoError) {
+                had_error = true;
+                fprintf(stderr, "render_path_tests: resize cycle (%ux%u pass): %.*s\n",
+                        w, h, (int)message.length, message.data);
+            }
+            popped = true;
+        });
+    wait_for(&popped);
+    assert(!had_error && "resize cycle: recreate-at-new-size produced a Dawn validation error");
+
+    // SAMPLE_PS_WGSL (defined above, Test 2) writes vec4(v,v,v,1.0) where
+    // v = tex.x -- r/g/b track the cleared display_tex value, alpha is
+    // always hardcoded to 1.0 (same shape asserted by test_offscreen_draw_
+    // and_readback above).
+    for (uint32_t i = 0; i < w * h; i++) {
+        assert(fabsf(pixels[i * 4 + 0] - clear_value) < 1e-5f);
+        assert(fabsf(pixels[i * 4 + 1] - clear_value) < 1e-5f);
+        assert(fabsf(pixels[i * 4 + 2] - clear_value) < 1e-5f);
+        assert(fabsf(pixels[i * 4 + 3] - 1.0f) < 1e-5f);
+    }
+
+    graphics::release(&samp);
+    graphics::release(&rt);
+    graphics::release(&display_tex);
+    graphics::release(&accum);
+}
+
+static void test_resize_cycle_offscreen() {
+    graphics::VertexShader vs =
+        graphics::get_vertex_shader_from_code((char *)QUAD_VS_WGSL, (uint32_t)strlen(QUAD_VS_WGSL));
+    assert(graphics::is_ready(&vs));
+    graphics::PixelShader ps =
+        graphics::get_pixel_shader_from_code((char *)SAMPLE_PS_WGSL, (uint32_t)strlen(SAMPLE_PS_WGSL));
+    assert(graphics::is_ready(&ps));
+    graphics::Mesh quad = graphics::get_mesh(quad_vertices, quad_vertices_count,
+                                             quad_vertices_stride, NULL, 0, 0);
+    assert(graphics::is_ready(&quad));
+
+    // Size A -> render/dispatch -> release -> size B (larger, different
+    // aspect ratio) -> render/dispatch again, reusing the SAME vs/ps/quad
+    // mesh (and therefore the SAME cached pipelines) across the resize --
+    // exactly mirroring main.cpp's Task 2b resize path, where quad_mesh/
+    // vertex_shader_2d/pixel_shader_2d are never recreated, only the
+    // screen-sized resources are.
+    run_resize_cycle_pass(&vs, &ps, &quad, 16, 12, 0.25f);
+    run_resize_cycle_pass(&vs, &ps, &quad, 48, 20, 0.75f);
+
+    printf("render_path_tests: resize cycle (recreate display_tex/accum/RT at a new "
+           "size, reusing cached pipelines) passed\n");
+
+    graphics::release(&quad);
+    graphics::release(&vs);
+    graphics::release(&ps);
+}
+
 int main() {
     bool ok = graphics::init();   // headless: no init_swap_chain
     assert(ok);
@@ -736,6 +845,7 @@ int main() {
     test_unset_texture_clears_sampler();
     test_particle_chain_pixels_exist();
     test_compute_sampler_pairing();
+    test_resize_cycle_offscreen();
 
     graphics::release();
     printf("All render path tests passed\n");

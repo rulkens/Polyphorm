@@ -817,6 +817,14 @@ int main(int argc, char **argv)
     bool sort_agents = false;
     float background_color = 0.0;
     VisualizationMode vis_mode = VisualizationMode::VM_PARTICLES;
+    // M4a Task 2b: true for any frame where the window's current framebuffer
+    // or logical size has a zero dimension (minimized/degenerate window).
+    // Set fresh each frame from platform::get_window_size below; the
+    // screen-sized resources (depth_buffer/display_tex/display_accum_buffer)
+    // are deliberately NOT torn down in this case — they keep their
+    // last-valid size, ready to resume the moment the window becomes visible
+    // again. Rendering itself is skipped for the frame (guards below).
+    bool window_minimized = false;
 
     // Headless acceptance: mean trace energy at data points must rise (read after the loop).
     float e_first = -1.0f;
@@ -846,6 +854,66 @@ int main(int argc, char **argv)
                 case EventType::EXIT:
                     is_running = false;
                 break;
+            }
+        }
+
+        // Resize handling (M4a Task 2b, user-requested deviation from
+        // upstream's fixed-size window). Option A split (research notes):
+        // sim-facing screen resources (depth_buffer/display_tex/
+        // display_accum_buffer/rendering_config.screen_width/height) track
+        // LOGICAL window size; the surface/swapchain tracks FRAMEBUFFER
+        // (Retina 2x) size. Polled once per frame — platform::get_event
+        // above already pumped GLFW's event queue, so glfwGetWindowSize/
+        // glfwGetFramebufferSize are current. This is the top-of-frame safe
+        // point: no command encoder is open yet (the previous frame's
+        // swap_frames() already flushed it) and no set_*/run_* calls have
+        // happened yet this frame.
+        {
+            uint32_t new_logical_w, new_logical_h, new_fb_w, new_fb_h;
+            platform::get_window_size(&window, &new_logical_w, &new_logical_h, &new_fb_w, &new_fb_h);
+            window_minimized = (new_logical_w == 0 || new_logical_h == 0 ||
+                                new_fb_w == 0 || new_fb_h == 0);
+
+            if (!window_minimized &&
+                (new_logical_w != window_width || new_logical_h != window_height)) {
+                graphics::resize_surface(new_fb_w, new_fb_h);
+
+                window_width = new_logical_w;
+                window_height = new_logical_h;
+
+                graphics::release(&depth_buffer);
+                depth_buffer = graphics::get_depth_buffer(window_width, window_height);
+                assert(graphics::is_ready(&depth_buffer));
+
+                graphics::release(&display_tex);
+                display_tex = graphics::get_texture2D(NULL, window_width, window_height, graphics::Format::RGBA32_FLOAT, 16);
+                assert(graphics::is_ready(&display_tex));
+
+                graphics::release(&display_accum_buffer);
+                display_accum_buffer = graphics::get_structured_buffer(sizeof(uint32_t), window_width * window_height);
+                assert(graphics::is_ready(&display_accum_buffer));
+
+                aspect_ratio = float(window_width) / float(window_height);
+                if (CAMERA_FOV > 0.0)
+                    rendering_config.projection = math::get_perspective_projection_dx_rh(math::deg2rad(CAMERA_FOV), aspect_ratio, 0.01, 10.0);
+                else
+                    rendering_config.projection = math::get_orthographics_projection_dx_rh(-1.4 * aspect_ratio, 1.4 * aspect_ratio, -1.4, 1.4, 0.01, 10.0);
+                rendering_config.screen_width = (float)window_width;
+                rendering_config.screen_height = (float)window_height;
+                graphics::update_constant_buffer(&rendering_settings_buffer, &rendering_config);
+
+                // ui:: is NOT notified: imgui_impl_glfw tracks the GLFW
+                // window's display size itself every ImGui_ImplGlfw_NewFrame()
+                // call (ui.cpp's ensure_frame_open) — re-running ui::init
+                // here would double-init ImGui (cpplib/ui.h stays
+                // byte-unchanged; no such re-init hook exists anyway).
+                //
+                // render_target_window is NOT recreated: its width/height
+                // fields are dead metadata (graphics.cpp's window_view()
+                // always re-acquires the live surface texture at whatever
+                // size the surface was just Configure'd to above — grep
+                // confirms no reader of RenderTarget::width/height for the
+                // is_window==true case).
             }
         }
 
@@ -1157,7 +1225,11 @@ int main(int argc, char **argv)
         }
 
         // Rendering
-        if (!headless)
+        // window_minimized: skip the whole windowed frame (rendering + UI
+        // draws + present) when the window has a zero-sized dimension —
+        // main.cpp must not touch the (unconfigured-this-frame) surface or
+        // dispatch/draw with a zero screen dimension (M4a Task 2b).
+        if (!headless && !window_minimized)
         {
             graphics::set_render_targets_viewport(&render_target_window);
             graphics::clear_render_target(&render_target_window, background_color, background_color, background_color, 1.0);
@@ -1343,7 +1415,7 @@ int main(int argc, char **argv)
             if (headless && simulation_config.n_iteration % 50 == 0)
                 printf("[headless] iteration %d  E = %f\n", simulation_config.n_iteration, energy_mean_this_frame);
 
-          if (!headless) {
+          if (!headless && !window_minimized) {
             graphics::set_render_targets_viewport(&render_target_window);
 
             // Draw histogram
@@ -1484,7 +1556,7 @@ int main(int argc, char **argv)
         }
 
         // UI
-        if (!headless && show_ui) {
+        if (!headless && !window_minimized && show_ui) {
             graphics::set_render_targets_viewport(&render_target_window);
 
             Panel panel = ui::start_panel("", Vector2(0.0, 0.0), 1.0);

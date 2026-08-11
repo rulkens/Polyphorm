@@ -22,6 +22,12 @@ bool init_device(GpuContext *ctx);
 // Surface creation and configuration at framebuffer resolution (preserves Retina fix).
 // Returns false on failure (fatal will have been called).
 bool init_surface(GpuContext *ctx, Window *window);
+// Re-Configure an already-created surface at a new framebuffer size (M4a
+// Task 2b: window resize support). Caller (graphics::resize_surface) is
+// responsible for skipping this when width/height is 0 (minimized/
+// degenerate window — Dawn requires positive Configure extents) and for
+// calling only between frames (no open command encoder/render pass).
+void resize_surface(GpuContext *ctx, uint32_t width, uint32_t height);
 // Combined initialization: calls init_device then init_surface in sequence.
 // Fatal (prints the missing feature/limit name and aborts) on any failure —
 // spec "Error handling": startup capability misses must be loud and named.

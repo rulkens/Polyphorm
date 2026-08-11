@@ -42,7 +42,9 @@ Window get_window(char *window_name, uint32_t window_width, uint32_t window_heig
     if (!glfwInit()) return window;
     // No GL context — the surface belongs to WebGPU (Task 4).
     glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-    glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);  // original window is fixed-size
+    // Resizable (GLFW's default) — M4a Task 2b, user-requested deviation from
+    // upstream's fixed-size window (windowing lifecycle only; not simulation
+    // math/quirk territory).
     GLFWwindow *handle = glfwCreateWindow((int)window_width, (int)window_height,
                                           window_name, nullptr, nullptr);
     if (!handle) { glfwTerminate(); return window; }
@@ -85,6 +87,19 @@ bool is_window_valid(Window *window) {
 
 GLFWwindow *get_glfw_window() {
     return g_glfw_window;
+}
+
+void get_window_size(Window *window, uint32_t *out_logical_w, uint32_t *out_logical_h,
+                     uint32_t *out_fb_w, uint32_t *out_fb_h) {
+    int lw = 0, lh = 0, fw = 0, fh = 0;
+    if (window && window->window_handle) {
+        glfwGetWindowSize(window->window_handle, &lw, &lh);
+        glfwGetFramebufferSize(window->window_handle, &fw, &fh);
+    }
+    if (out_logical_w) *out_logical_w = (uint32_t)lw;
+    if (out_logical_h) *out_logical_h = (uint32_t)lh;
+    if (out_fb_w) *out_fb_w = (uint32_t)fw;
+    if (out_fb_h) *out_fb_h = (uint32_t)fh;
 }
 
 bool get_event(Event *event) {

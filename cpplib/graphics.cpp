@@ -130,6 +130,14 @@ bool init_swap_chain(Window *window) {
     return gpu::init_surface(&g_gpu, window);
 }
 
+void resize_surface(uint32_t fb_width, uint32_t fb_height) {
+    // Minimized/degenerate window: skip Configure entirely (Dawn requires a
+    // positive extent). The caller (main.cpp) is expected to also skip
+    // rendering for that frame — see graphics.h's resize_surface comment.
+    if (fb_width == 0 || fb_height == 0) return;
+    gpu::resize_surface(&g_gpu, fb_width, fb_height);
+}
+
 RenderTarget get_render_target_window() {
     RenderTarget rt = {};
     rt.is_window = true;

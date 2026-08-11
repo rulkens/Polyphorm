@@ -104,6 +104,15 @@ struct ShaderConstant { const char *name; double value; };
 // ---- lifecycle ----
 bool init();                            // device only (headless-safe); sets graphics_context
 bool init_swap_chain(Window *window);   // surface config (framebuffer size)
+// Re-Configure the window surface at a new framebuffer size (M4a Task 2b:
+// window resize support). No-op when either dimension is 0 (minimized/
+// degenerate window) — Dawn requires positive Configure extents; main.cpp
+// is expected to skip all rendering for that frame too. MUST be called
+// between frames — no open command encoder/render pass (top-of-frame,
+// before any set_*/run_* calls, is the safe point; graphics.cpp never
+// holds an open encoder there since the previous frame's swap_frames()
+// already flushed it).
+void resize_surface(uint32_t fb_width, uint32_t fb_height);
 void swap_frames();                     // submit + present
 void release();                         // teardown, last call
 

@@ -111,6 +111,22 @@ bool init_device(GpuContext *ctx) {
     return true;
 }
 
+// Shared by init_surface and resize_surface — the surface Configure call
+// itself doesn't care whether this is the first configuration or a resize.
+static void configure_surface(GpuContext *ctx, uint32_t width, uint32_t height) {
+    static wgpu::TextureFormat srgb = wgpu::TextureFormat::BGRA8UnormSrgb;
+    wgpu::SurfaceConfiguration config = {};
+    config.device = ctx->device;
+    config.format = ctx->surface_format;
+    config.usage = wgpu::TextureUsage::RenderAttachment;
+    config.width = width;
+    config.height = height;
+    config.presentMode = wgpu::PresentMode::Fifo;  // = the original's Present(1,0) vsync
+    config.viewFormatCount = 1;
+    config.viewFormats = &srgb;
+    ctx->surface.Configure(&config);
+}
+
 bool init_surface(GpuContext *ctx, Window *window) {
     ctx->surface = wgpu::glfw::CreateSurfaceForWindow(ctx->instance, window->window_handle);
     if (!ctx->surface) fatal("CreateSurfaceForWindow failed");
@@ -121,19 +137,14 @@ bool init_surface(GpuContext *ctx, Window *window) {
     glfwGetFramebufferSize(window->window_handle, &fb_w, &fb_h);
     ctx->width = fb_w;
     ctx->height = fb_h;
-
-    static wgpu::TextureFormat srgb = wgpu::TextureFormat::BGRA8UnormSrgb;
-    wgpu::SurfaceConfiguration config = {};
-    config.device = ctx->device;
-    config.format = ctx->surface_format;
-    config.usage = wgpu::TextureUsage::RenderAttachment;
-    config.width = ctx->width;
-    config.height = ctx->height;
-    config.presentMode = wgpu::PresentMode::Fifo;  // = the original's Present(1,0) vsync
-    config.viewFormatCount = 1;
-    config.viewFormats = &srgb;
-    ctx->surface.Configure(&config);
+    configure_surface(ctx, ctx->width, ctx->height);
     return true;
+}
+
+void resize_surface(GpuContext *ctx, uint32_t width, uint32_t height) {
+    ctx->width = width;
+    ctx->height = height;
+    configure_surface(ctx, width, height);
 }
 
 GpuContext init(Window *window) {
