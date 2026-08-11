@@ -159,10 +159,6 @@ int main() {
         graphics::StructuredBuffer buf = graphics::get_structured_buffer(sizeof(uint32_t), W * H);
         graphics::set_texture_compute(&tex, 0);
         graphics::set_structured_buffer(&buf, 1);
-        // Reset the group-0 uniform shadow state (this kernel declares no
-        // @group(0) uniform); see the DEVIATION note in Test 2 above for why.
-        graphics::ConstantBuffer no_uniform = {};
-        graphics::set_constant_buffer(&no_uniform, 0);
         graphics::set_compute_shader(&cs);
         graphics::run_compute(W / 8, H / 8, 1);
         graphics::unset_texture_compute(0);
@@ -209,9 +205,18 @@ int main() {
         graphics::set_constant_buffer(&cfg_buffer, 0);      // deliberately stale
         graphics::set_compute_shader(&tex_shader);          // test_tex3d_roundtrip: no @group(0)
         assert(!tex_shader.uses_group0);
+        graphics::StructuredBuffer readback_buffer =
+            graphics::get_structured_buffer(sizeof(float), W * H * D);
         graphics::set_texture_compute(&tex3d, 0);
-        graphics::run_compute(1, 1, 1);                     // must NOT Dawn-error (M2a needed a manual reset here)
+        graphics::set_structured_buffer(&readback_buffer, 1);
+        graphics::run_compute(W / 4, H / 4, D / 4);        // must NOT Dawn-error (M2a needed a manual reset here)
+        float readback_values[W * H * D];
+        graphics::capture_structured_buffer(&readback_buffer, readback_values, W * H * D, sizeof(float));
+        for (uint32_t i = 0; i < W * H * D; i++)
+            assert(readback_values[i] == 2.5f);  // texture was cleared to 2.5f; this proves dispatch worked
         graphics::unset_texture_compute(0);
+        graphics::unset_structured_buffer(1);
+        graphics::release(&readback_buffer);
 
         // (b) uses_group0 detection on a uniform-declaring shader.
         assert(ids_shader.uses_group0);
@@ -222,7 +227,11 @@ int main() {
         graphics::set_structured_buffer(&out_buffer, 2);
         graphics::unset_structured_buffer(2);
         graphics::set_structured_buffer(&out_buffer, 2);
-        graphics::run_compute(1, 1, 1);
+        graphics::run_compute((1000 + 63) / 64, 1, 1);     // ids_shader has @workgroup_size(64)
+        uint32_t ids_result[1000];
+        graphics::capture_structured_buffer(&out_buffer, ids_result, 1000, sizeof(uint32_t));
+        for (uint32_t i = 0; i < 1000; i++)
+            assert(ids_result[i] == i * 5u + 7u);  // cfg.mul=5, MULTIPLIER default=1, cfg.add=7
         graphics::unset_structured_buffer(2);
 
         printf("graphics_tests: group0 hardening + unset_structured_buffer passed\n");
