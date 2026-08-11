@@ -68,19 +68,6 @@ int main() {
         // view bound as read (it should not; access is declared shader-side),
         // record the finding, it affects M2b's decay shader (D1 narrowing).
         graphics::set_structured_buffer(&buf, 1);
-        // DEVIATION from brief: test_tex3d_roundtrip.wgsl declares no @group(0)
-        // uniform, but Test 1's set_constant_buffer(&cb, 0) left g_uniform_buffer
-        // shadow state set. run_compute's group-0 code binds unconditionally on
-        // "g_uniform_buffer is set" rather than "the shader declares group 0",
-        // so without this reset it tries to bind 1 entry against pipeline B's
-        // auto-generated *empty* group-0 layout -> Dawn validation error
-        // ("binding index 0 not present in the bind group layout"), silently
-        // invalidating the whole compute pass. Reset via the existing public
-        // API (an empty ConstantBuffer has a null wgpu::Buffer, so the
-        // `if (g_uniform_buffer)` guard in run_compute skips group 0 entirely)
-        // rather than adding a new unset_constant_buffer to the frozen header.
-        graphics::ConstantBuffer no_uniform = {};
-        graphics::set_constant_buffer(&no_uniform, 0);
         graphics::set_compute_shader(&cs);
         graphics::run_compute(W / 4, H / 4, D / 4);
         graphics::unset_texture_compute(0);
@@ -187,6 +174,60 @@ int main() {
             assert(result[i] == 42u);
         printf("graphics_tests: tex2d uint clear+roundtrip passed\n");
         graphics::release(&buf); graphics::release(&tex); graphics::release(&cs);
+    }
+
+    // --- Test 6: group-0 binding driven by shader declaration, not shadow state. ---
+    {
+        File ids_file;
+        char *ids_code = load_shader("test_write_ids.wgsl", &ids_file);
+        graphics::ComputeShader ids_shader =
+            graphics::get_compute_shader_from_code(ids_code, (uint32_t)ids_file.size);
+        assert(graphics::is_ready(&ids_shader));
+        file_system::release_file(ids_file);
+
+        File tex_file;
+        char *tex_code = load_shader("test_tex3d_roundtrip.wgsl", &tex_file);
+        graphics::ComputeShader tex_shader =
+            graphics::get_compute_shader_from_code(tex_code, (uint32_t)tex_file.size);
+        assert(graphics::is_ready(&tex_shader));
+        file_system::release_file(tex_file);
+
+        graphics::ConstantBuffer cfg_buffer = graphics::get_constant_buffer(16);
+        uint32_t cfg[4] = {5, 7, 0, 0};
+        graphics::update_constant_buffer(&cfg_buffer, cfg);
+
+        const uint32_t W = 8, H = 8, D = 8;
+        graphics::Texture3D tex3d =
+            graphics::get_texture3D(nullptr, W, H, D, graphics::Format::R32_FLOAT);
+        graphics::clear_texture(&tex3d, 2.5f);
+
+        graphics::StructuredBuffer out_buffer =
+            graphics::get_structured_buffer(sizeof(uint32_t), 1000);
+
+        // (a) Uniform still bound in shadow state from an earlier test is
+        //     harmless for a shader that declares no @group(0).
+        graphics::set_constant_buffer(&cfg_buffer, 0);      // deliberately stale
+        graphics::set_compute_shader(&tex_shader);          // test_tex3d_roundtrip: no @group(0)
+        assert(!tex_shader.uses_group0);
+        graphics::set_texture_compute(&tex3d, 0);
+        graphics::run_compute(1, 1, 1);                     // must NOT Dawn-error (M2a needed a manual reset here)
+        graphics::unset_texture_compute(0);
+
+        // (b) uses_group0 detection on a uniform-declaring shader.
+        assert(ids_shader.uses_group0);
+
+        // (c) unset_structured_buffer clears a slot (rebind + dispatch still valid).
+        graphics::set_compute_shader(&ids_shader);
+        graphics::set_constant_buffer(&cfg_buffer, 0);
+        graphics::set_structured_buffer(&out_buffer, 2);
+        graphics::unset_structured_buffer(2);
+        graphics::set_structured_buffer(&out_buffer, 2);
+        graphics::run_compute(1, 1, 1);
+        graphics::unset_structured_buffer(2);
+
+        printf("graphics_tests: group0 hardening + unset_structured_buffer passed\n");
+        graphics::release(&tex3d); graphics::release(&out_buffer);
+        graphics::release(&cfg_buffer); graphics::release(&ids_shader); graphics::release(&tex_shader);
     }
 
     graphics::release();

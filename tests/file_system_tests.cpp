@@ -19,6 +19,7 @@ int main() {
     assert(f.data != nullptr);
     assert(f.size == payload_size);
     assert(memcmp(f.data, payload_data, payload_size) == 0);
+    assert(((char *)f.data)[f.size] == 0);  // extra NUL byte: shader sources are consumed as C strings
     file_system::release_file(f);
     remove(path);
 

@@ -79,7 +79,7 @@ struct StructuredBuffer {
 
 struct VertexShader  { wgpu::ShaderModule module; bool valid = false; }; // M2a: stub module
 struct PixelShader   { wgpu::ShaderModule module; bool valid = false; }; // M2a: stub module
-struct ComputeShader { wgpu::ComputePipeline pipeline; bool valid = false; };
+struct ComputeShader { wgpu::ComputePipeline pipeline; bool valid = false; bool uses_group0 = false; };
 
 // Named override constants passed at compute-pipeline creation (quirk toggles,
 // WG_X/Y/Z workgroup sizes — research notes §1).
@@ -148,6 +148,7 @@ void set_constant_buffer(ConstantBuffer *buffer, uint32_t slot); // slot must be
 StructuredBuffer get_structured_buffer(int element_stride, int num_elements);
 void update_structured_buffer(StructuredBuffer *buffer, void *data);
 void set_structured_buffer(StructuredBuffer *buffer, uint32_t slot);
+void unset_structured_buffer(uint32_t slot);
 void capture_structured_buffer(StructuredBuffer *buffer, void *mapped_data,
                                uint32_t num_elements, size_t element_size);
 

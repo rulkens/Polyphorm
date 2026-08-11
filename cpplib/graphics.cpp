@@ -148,6 +148,11 @@ void release() {
 
 // ---- M2a Task 4/5/6 implement these ----
 
+static void fatal(const char *what) {
+    fprintf(stderr, "[graphics] FATAL: %s\n", what);
+    exit(1);
+}
+
 static void warn_once(const char *what) {
     // one stderr line per distinct stub, first call only (`what` is always a
     // string literal, so pointer identity is a valid key)
@@ -429,6 +434,7 @@ static void run_clear(ClearKernel *k, wgpu::TextureView view, const void *value1
 }
 
 void clear_texture(Texture3D *texture, float value) {
+    assert(texture->format == Format::R32_FLOAT);
     ensure_clear_kernel(&g_clear3d, CLEAR_TEX3D_WGSL);
     float v[4] = {value, value, value, value};
     run_clear(&g_clear3d, texture->ua_view, v,
@@ -493,6 +499,12 @@ Mesh get_mesh(void *vertices, uint32_t vertex_count, uint32_t vertex_stride,
 void draw_mesh(Mesh *mesh) { (void)mesh; warn_once("draw_mesh"); }
 
 void set_structured_buffer(StructuredBuffer *b, uint32_t slot) { assert(slot < MAX_SLOTS); g_compute_slots[slot] = {}; g_compute_slots[slot].kind = BoundSlot::Kind::STORAGE_BUFFER; g_compute_slots[slot].buffer = b->buffer; g_compute_slots[slot].buffer_size = b->size; }
+
+void unset_structured_buffer(uint32_t slot)
+{
+    assert(slot < MAX_SLOTS);
+    g_compute_slots[slot] = {};
+}
 
 void capture_structured_buffer(StructuredBuffer *buffer, void *mapped_data,
                                uint32_t num_elements, size_t element_size) {
@@ -579,6 +591,10 @@ ComputeShader get_compute_shader_from_code(char *code, uint32_t code_length,
         });
     wait_for(&done);
     cs.valid = !had_error;
+
+    // Comment-safe enough for our controlled sources: every sim shader that
+    // uses a uniform declares it as literally "@group(0)".
+    cs.uses_group0 = (strstr(code, "@group(0)") != NULL);
     return cs;
 }
 
@@ -599,7 +615,10 @@ void run_compute(int gx, int gy, int gz) {
     // entries are a Dawn validation error (which names the binding; that is
     // the intended failure mode, better than D3D11's silent null reads).
     wgpu::BindGroup group0;
-    if (g_uniform_buffer) {
+    if (g_compute_shader->uses_group0) {
+        if (!g_uniform_buffer) {
+            fatal("run_compute: shader declares @group(0) uniform but no constant buffer is bound (set_constant_buffer slot 0)");
+        }
         wgpu::BindGroupEntry e = {};
         e.binding = 0; e.buffer = g_uniform_buffer; e.size = g_uniform_size;
         wgpu::BindGroupDescriptor d = {};
@@ -607,6 +626,7 @@ void run_compute(int gx, int gy, int gz) {
         d.entryCount = 1; d.entries = &e;
         group0 = g_ctx.device.CreateBindGroup(&d);
     }
+    // Shader without @group(0): never bind group 0, even if shadow state holds a uniform.
 
     std::vector<wgpu::BindGroupEntry> entries;
     for (uint32_t i = 0; i < MAX_SLOTS; i++) {
