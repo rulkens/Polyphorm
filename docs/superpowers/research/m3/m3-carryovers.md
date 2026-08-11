@@ -3,8 +3,9 @@
 From the M3 final whole-branch review (READY, c9ad07d..981ede0). M3 closed
 with VM_PARTICLES rendering live: atomic splat buffer → blit → textured quad
 draw, headless pixels-exist test with exact hand-derived values, 7/7 suites
-green. Human visual gate: see the checklist at the bottom — open until a
-human confirms.
+green. Human visual gate: PASSED 2026-08-12 — user confirmed chain/filament
+formation on a 6-chain synthetic dataset (2000 points, 1M agents, 128 grid);
+Esc/close clean. M3 fully closed.
 
 ## M4 must handle (ordered by likelihood of biting)
 
