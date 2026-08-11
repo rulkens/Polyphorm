@@ -109,6 +109,10 @@ namespace platform
 	// Check if window is valid
 	bool is_window_valid(Window *window);
 
+	// The single live GLFWwindow* platform:: owns (set by get_window). Needed
+	// by ui::init for ImGui_ImplGlfw_InitForOther (M4a design §4.1).
+	GLFWwindow *get_glfw_window();
+
 	// Get next Event, should be called per frame until false is returned
 	bool get_event(Event *event);
 

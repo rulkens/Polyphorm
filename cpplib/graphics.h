@@ -109,6 +109,11 @@ void release();                         // teardown, last call
 
 // ---- render targets / clears ----
 RenderTarget get_render_target_window();
+// The window view's format (BGRA8UnormSrgb) — single source of truth,
+// matching window_view()'s hardcoded view format and draw_mesh's pipeline
+// cache key (graphics.cpp). Used by ui.cpp for
+// ImGui_ImplWGPU_InitInfo::RenderTargetFormat (M4a design §1.3).
+wgpu::TextureFormat get_window_surface_format();
 // M3: real offscreen render target (RenderAttachment|CopySrc texture + view).
 // Never called by main.cpp (inventory: all "offscreen" buffers are compute-
 // written textures, not render targets) but is part of the 39-function
@@ -117,6 +122,16 @@ RenderTarget get_render_target(uint32_t width, uint32_t height, Format format);
 DepthBuffer get_depth_buffer(uint32_t width, uint32_t height);
 void set_render_targets_viewport(RenderTarget *buffer);
 void clear_render_target(RenderTarget *buffer, float r, float g, float b, float a);
+
+// ---- ui pass (M4a design §2.2) ----
+// Opens a LoadOp::Load render pass on the window surface — draws on top of
+// whatever the scene pass(es) already wrote this frame. Reuses the existing
+// static ensure_encoder()/window_view() machinery; does not introduce a
+// second render-pass idiom. Caller (ui.cpp) must invoke this after every
+// scene draw_mesh call and before graphics::swap_frames() for the same
+// frame (see ui::end()).
+wgpu::RenderPassEncoder begin_ui_pass();
+void end_ui_pass(wgpu::RenderPassEncoder pass);
 
 // ---- textures ----
 Texture2D get_texture2D(void *data, uint32_t width, uint32_t height, Format format,

@@ -160,6 +160,9 @@ RenderTarget get_render_target(uint32_t width, uint32_t height, Format format) {
 }
 
 // Acquire the surface texture for this frame if not already held.
+// Format kept in sync with get_window_surface_format() below — single
+// source of truth (M4a design §1.3); if this hardcoded format ever changes,
+// update that accessor too.
 static wgpu::TextureView window_view() {
     if (!g_surface_tex_acquired) {
         g_gpu.surface.GetCurrentTexture(&g_surface_tex);
@@ -178,6 +181,8 @@ static wgpu::TextureView window_view() {
     // `viewFormats`, add it there (1-line: viewFormatCount=1, viewFormats=&srgb).
     return g_surface_tex.texture.CreateView(&view_desc);
 }
+
+wgpu::TextureFormat get_window_surface_format() { return wgpu::TextureFormat::BGRA8UnormSrgb; }
 
 void set_render_targets_viewport(RenderTarget *buffer) {
     // D3D11 version set OM targets + viewport. WebGPU render passes carry the
@@ -204,6 +209,24 @@ void clear_render_target(RenderTarget *buffer, float r, float g, float b, float 
     wgpu::RenderPassEncoder pass = g_encoder.BeginRenderPass(&pass_desc);
     pass.End();
 }
+
+// M4a design §2.2: the ImGui render-pass entry point. LoadOp::Load means
+// this draws on top of whatever the scene pass(es) already wrote to the
+// window view this frame — correct only when called after every scene
+// draw_mesh call and before swap_frames() (enforced by ui::end()'s call
+// site, main.cpp).
+wgpu::RenderPassEncoder begin_ui_pass() {
+    ensure_encoder();
+    wgpu::RenderPassColorAttachment att = {};
+    att.view = window_view();
+    att.loadOp = wgpu::LoadOp::Load;
+    att.storeOp = wgpu::StoreOp::Store;
+    wgpu::RenderPassDescriptor pass_desc = {};
+    pass_desc.colorAttachmentCount = 1;
+    pass_desc.colorAttachments = &att;
+    return g_encoder.BeginRenderPass(&pass_desc);
+}
+void end_ui_pass(wgpu::RenderPassEncoder pass) { pass.End(); }
 
 void swap_frames() {
     flush_commands();

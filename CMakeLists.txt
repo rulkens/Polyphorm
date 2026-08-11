@@ -39,6 +39,44 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(dawn)
 
+# Dear ImGui, pinned by commit hash (M4a: docs/superpowers/research/m4/
+# imgui-integration-design.md §1.2). GIT_SHALLOW OFF is required for a
+# hash-based GIT_TAG — CMake/git cannot shallow-fetch an arbitrary commit
+# that isn't a branch tip. The FetchContent adds a ~100MB full-history
+# clone on first configure only.
+FetchContent_Declare(
+  imgui
+  GIT_REPOSITORY https://github.com/ocornut/imgui
+  GIT_TAG        01380c579715e62fb9a8d6ec0502c4ea83bfde6e   # v1.92.9, non-docking
+  GIT_SHALLOW    OFF
+)
+FetchContent_MakeAvailable(imgui)
+
+add_library(imgui STATIC
+  ${imgui_SOURCE_DIR}/imgui.cpp
+  ${imgui_SOURCE_DIR}/imgui_draw.cpp
+  ${imgui_SOURCE_DIR}/imgui_tables.cpp
+  ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+  ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
+  ${imgui_SOURCE_DIR}/backends/imgui_impl_wgpu.cpp
+)
+target_include_directories(imgui PUBLIC
+  ${imgui_SOURCE_DIR}
+  ${imgui_SOURCE_DIR}/backends
+)
+target_compile_definitions(imgui PUBLIC IMGUI_IMPL_WEBGPU_BACKEND_DAWN)
+target_link_libraries(imgui PUBLIC webgpu_dawn webgpu_glfw glfw)
+# macOS: imgui_impl_wgpu.cpp's own source comment documents this requirement
+# — it #includes Cocoa/CAMetalLayer under __APPLE__ && TARGET_OS_OSX and must
+# be compiled as Objective-C++, not plain C++, or Foundation's @class/@protocol
+# syntax fails to parse. Not part of DESIGN §1.2's snippet (which predates
+# hitting this on-macOS build error) — required to make the verbatim block
+# actually compile on this platform.
+if(APPLE)
+  set_source_files_properties(${imgui_SOURCE_DIR}/backends/imgui_impl_wgpu.cpp
+    PROPERTIES COMPILE_FLAGS "-x objective-c++")
+endif()
+
 add_executable(polyphorm
   main.cpp
   cpplib/platform.cpp
@@ -50,10 +88,10 @@ add_executable(polyphorm
   cpplib/file_system.cpp
   cpplib/gpu/gpu_context.cpp
   cpplib/graphics.cpp
-  cpplib/ui_stub.cpp
+  cpplib/ui.cpp
 )
 target_include_directories(polyphorm PRIVATE cpplib)
-target_link_libraries(polyphorm PRIVATE webgpu_dawn webgpu_glfw glfw)
+target_link_libraries(polyphorm PRIVATE imgui webgpu_dawn webgpu_glfw glfw)
 target_compile_definitions(polyphorm PRIVATE SHADER_ROOT="${CMAKE_SOURCE_DIR}/shaders")
 # -UNDEBUG: see the note below on the test targets — Release mode compiles
 # out every load-bearing assert() (set_constant_buffer slot==0, run_compute

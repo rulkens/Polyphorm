@@ -1207,13 +1207,16 @@ int main(int argc, char **argv)
                 graphics::set_vertex_shader(&vertex_shader);
                 graphics::set_texture(&trace_tex, 0);
                 graphics::set_texture_sampler(&tex_sampler_trace, 0);
+                PixelShader *selected_ps = nullptr;
                 if (vis_mode == VisualizationMode::VM_VOLUME) {
                     graphics::set_pixel_shader(&pixel_shader);
+                    selected_ps = &pixel_shader;
                     graphics::set_texture(&palette_trace_tex, 1);
                     graphics::set_texture_sampler(&tex_sampler_color_palette, 1);
                 }
                 else if (vis_mode == VisualizationMode::VM_VOLUME_HIGHLIGHT) {
                     graphics::set_pixel_shader(&ps_volume_highlight);
+                    selected_ps = &ps_volume_highlight;
                     if (is_a)
                         graphics::set_texture(&trail_tex_A, 1);
                     else
@@ -1222,6 +1225,7 @@ int main(int argc, char **argv)
                 }
                 else if (vis_mode == VisualizationMode::VM_VOLUME_HALOCOLOR) {
                     graphics::set_pixel_shader(&ps_volume_halocolor);
+                    selected_ps = &ps_volume_halocolor;
                     if (is_a)
                         graphics::set_texture(&trail_tex_A, 1);
                     else
@@ -1230,31 +1234,36 @@ int main(int argc, char **argv)
                 }
                 else if (vis_mode == VisualizationMode::VM_VOLUME_OVERDENSITY) {
                     graphics::set_pixel_shader(&ps_volume_overdensity);
+                    selected_ps = &ps_volume_overdensity;
                 }
                 else if (vis_mode == VisualizationMode::VM_VOLUME_VELOCITY) {
                     graphics::set_pixel_shader(&ps_volume_velocity);
+                    selected_ps = &ps_volume_velocity;
                 }
 
-                // Draw the stack most perpendicular to the current origin-relative camera position
-                float rotation_angle = 0.0;
-                if (math::abs(eye_pos.z) >= math::abs(eye_pos.x) && math::abs(eye_pos.z) >= math::abs(eye_pos.y)) {
-                    rotation_angle = (eye_pos.z > 0.0)? 0.0 : math::PI;
-                    rendering_config.model = math::get_rotation(rotation_angle, Vector3(0, 1, 0)) * math::get_scale(1.0, WORLD_SIZE_Y / WORLD_SIZE_X, WORLD_SIZE_Z / WORLD_SIZE_X);
-                    rendering_config.texcoord_map = (eye_pos.z > 0.0)? 1 : -1;
-                    graphics::update_constant_buffer(&rendering_settings_buffer, &rendering_config);
-                    graphics::draw_mesh(&super_quad_mesh);
-                } else if (math::abs(eye_pos.y) >= math::abs(eye_pos.x) && math::abs(eye_pos.y) >= math::abs(eye_pos.z)) {
-                    rotation_angle = (eye_pos.y > 0.0)? -math::PIHALF : math::PIHALF;
-                    rendering_config.model = math::get_rotation(rotation_angle, Vector3(1, 0, 0)) * math::get_scale(1.0, WORLD_SIZE_Z / WORLD_SIZE_X, WORLD_SIZE_Y / WORLD_SIZE_X);
-                    rendering_config.texcoord_map = (eye_pos.y > 0.0)? 2 : -2;
-                    graphics::update_constant_buffer(&rendering_settings_buffer, &rendering_config);
-                    graphics::draw_mesh(&super_quad_mesh);
-                } else if (math::abs(eye_pos.x) > math::abs(eye_pos.y) && math::abs(eye_pos.x) > math::abs(eye_pos.z)) {
-                    rotation_angle = (eye_pos.x > 0.0)? math::PIHALF : -math::PIHALF;
-                    rendering_config.model = math::get_rotation(rotation_angle, Vector3(0, 1, 0)) * math::get_scale(WORLD_SIZE_Z / WORLD_SIZE_X, WORLD_SIZE_Y / WORLD_SIZE_X, 1.0);
-                    rendering_config.texcoord_map = (eye_pos.x > 0.0)? 3 : -3;
-                    graphics::update_constant_buffer(&rendering_settings_buffer, &rendering_config);
-                    graphics::draw_mesh(&super_quad_mesh);
+                // M4b: real shader lands, gate stays as belt-and-suspenders
+                if (graphics::is_ready(&vertex_shader) && selected_ps && graphics::is_ready(selected_ps)) {
+                    // Draw the stack most perpendicular to the current origin-relative camera position
+                    float rotation_angle = 0.0;
+                    if (math::abs(eye_pos.z) >= math::abs(eye_pos.x) && math::abs(eye_pos.z) >= math::abs(eye_pos.y)) {
+                        rotation_angle = (eye_pos.z > 0.0)? 0.0 : math::PI;
+                        rendering_config.model = math::get_rotation(rotation_angle, Vector3(0, 1, 0)) * math::get_scale(1.0, WORLD_SIZE_Y / WORLD_SIZE_X, WORLD_SIZE_Z / WORLD_SIZE_X);
+                        rendering_config.texcoord_map = (eye_pos.z > 0.0)? 1 : -1;
+                        graphics::update_constant_buffer(&rendering_settings_buffer, &rendering_config);
+                        graphics::draw_mesh(&super_quad_mesh);
+                    } else if (math::abs(eye_pos.y) >= math::abs(eye_pos.x) && math::abs(eye_pos.y) >= math::abs(eye_pos.z)) {
+                        rotation_angle = (eye_pos.y > 0.0)? -math::PIHALF : math::PIHALF;
+                        rendering_config.model = math::get_rotation(rotation_angle, Vector3(1, 0, 0)) * math::get_scale(1.0, WORLD_SIZE_Z / WORLD_SIZE_X, WORLD_SIZE_Y / WORLD_SIZE_X);
+                        rendering_config.texcoord_map = (eye_pos.y > 0.0)? 2 : -2;
+                        graphics::update_constant_buffer(&rendering_settings_buffer, &rendering_config);
+                        graphics::draw_mesh(&super_quad_mesh);
+                    } else if (math::abs(eye_pos.x) > math::abs(eye_pos.y) && math::abs(eye_pos.x) > math::abs(eye_pos.z)) {
+                        rotation_angle = (eye_pos.x > 0.0)? math::PIHALF : -math::PIHALF;
+                        rendering_config.model = math::get_rotation(rotation_angle, Vector3(0, 1, 0)) * math::get_scale(WORLD_SIZE_Z / WORLD_SIZE_X, WORLD_SIZE_Y / WORLD_SIZE_X, 1.0);
+                        rendering_config.texcoord_map = (eye_pos.x > 0.0)? 3 : -3;
+                        graphics::update_constant_buffer(&rendering_settings_buffer, &rendering_config);
+                        graphics::draw_mesh(&super_quad_mesh);
+                    }
                 }
 
                 graphics::unset_texture(0);
@@ -1294,12 +1303,15 @@ int main(int argc, char **argv)
                     rendering_config.pt_iteration++;
                 }
 
-                graphics::set_vertex_shader(&vertex_shader_2d);
-                graphics::set_pixel_shader(&ps_volpath);
-                graphics::set_texture(&display_tex, 0);
-                graphics::set_texture_sampler(&tex_sampler_display, 0);
-                graphics::draw_mesh(&quad_mesh);
-                graphics::unset_texture(0);
+                // M4b: real shader lands, gate stays as belt-and-suspenders
+                if (graphics::is_ready(&ps_volpath)) {
+                    graphics::set_vertex_shader(&vertex_shader_2d);
+                    graphics::set_pixel_shader(&ps_volpath);
+                    graphics::set_texture(&display_tex, 0);
+                    graphics::set_texture_sampler(&tex_sampler_display, 0);
+                    graphics::draw_mesh(&quad_mesh);
+                    graphics::unset_texture(0);
+                }
             }
         }
 
@@ -1642,6 +1654,7 @@ int main(int argc, char **argv)
         if (run_mold) {
             ++simulation_config.n_iteration;
         }
+        if (!headless) ui::end();   // guarantee exactly one ImGui Render per frame (design §4.2)
         if (!headless) graphics::swap_frames();
         // else: no swap chain to present to. capture_structured_buffer() in the
         // histogram statistics block above already forces a command-queue flush

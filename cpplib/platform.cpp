@@ -83,6 +83,10 @@ bool is_window_valid(Window *window) {
     return window && window->window_handle != nullptr;
 }
 
+GLFWwindow *get_glfw_window() {
+    return g_glfw_window;
+}
+
 bool get_event(Event *event) {
     // First call each frame pumps the OS queue; subsequent calls drain ours —
     // preserving the original drain-per-frame Win32-message-pump contract.
