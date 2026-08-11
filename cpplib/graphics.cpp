@@ -30,6 +30,45 @@ static wgpu::Buffer g_uniform_buffer;            // group 0 binding 0
 static uint64_t g_uniform_size = 0;
 static ComputeShader *g_compute_shader = nullptr;
 
+// Render-path shadow state (Task 1 / M3, render-path-design.md §2/§5).
+// Render slots are independent of g_compute_slots and are a {view, sampler}
+// PAIR per slot (not a tagged union) — a texture write and a sampler write
+// to the same slot must both survive, unlike the compute path's single-`kind`
+// BoundSlot (design §5's documented divergence from the compute convention).
+static VertexShader *g_vertex_shader = nullptr;
+static PixelShader  *g_pixel_shader  = nullptr;
+static RenderTarget  g_render_target = {};
+struct RenderSlot { wgpu::TextureView view; wgpu::Sampler sampler; };
+static RenderSlot g_render_slots[MAX_SLOTS];
+
+// Lazy render-pipeline cache (design §2). Cache key deliberately omits
+// depth-attachment presence: depth is never bound for the whole M3/M4
+// lifetime (§7). Design §2 also proposed omitting target FORMAT from the
+// key, reasoning main.cpp always draws to the window's fixed sRGB BGRA8
+// view — but that assumption holds only for main.cpp, not for this task's
+// own headless tests: render_path_tests draws into an offscreen
+// RGBA32_FLOAT RenderTarget (via get_render_target) to make draw_mesh
+// verifiable without a window. A hardcoded BGRA8UnormSrgb target format
+// would make that draw fail Dawn's render-pass/pipeline attachment-
+// compatibility validation outright. DEVIATION: target format IS included
+// in the key and in the pipeline descriptor (derived from g_render_target
+// at draw time — window => BGRA8UnormSrgb matching window_view(), offscreen
+// => RenderTarget::format) — this is exactly the widening design §2's own
+// risk register anticipated ("a future milestone that adds an offscreen
+// target... knows to widen the key rather than silently reuse a wrong-
+// format cached pipeline"), done now because Task 1 introduces that
+// offscreen target itself. main.cpp's real M3/M4 draws are unaffected: they
+// only ever target the window, so this always resolves to the same
+// BGRA8UnormSrgb entry design §2 assumed.
+struct PipelineCacheEntry {
+    WGPUShaderModule vs = nullptr, ps = nullptr;
+    BlendType blend = BlendType::OPAQUE;
+    uint32_t stride = 0;
+    wgpu::TextureFormat target_format = wgpu::TextureFormat::Undefined;
+    wgpu::RenderPipeline pipeline;
+};
+static std::vector<PipelineCacheEntry> g_pipeline_cache;
+
 // One lazily-built pipeline + scratch uniform per builtin clear kernel
 // (declared here, ahead of release(), so release() can reset them; the WGSL
 // sources and ensure_clear_kernel()/run_clear() stay further down near the
@@ -39,6 +78,11 @@ struct ClearKernel {
     wgpu::Buffer uniform;   // 16 bytes
 };
 static ClearKernel g_clear3d, g_clear2d_f, g_clear2d_u;
+
+// Forward declarations: get_render_target (below) needs the format
+// conversion helper that's otherwise defined further down, next to the
+// other texture helpers it belongs with.
+static wgpu::TextureFormat to_wgpu(Format f);
 
 static void ensure_encoder() {
     if (!g_encoder) g_encoder = g_ctx.device.CreateCommandEncoder();
@@ -78,6 +122,27 @@ RenderTarget get_render_target_window() {
     return rt;
 }
 
+// M3: real offscreen render target. Never called by main.cpp (all
+// "offscreen" buffers in the original are compute-written textures, not
+// render targets — inventory §3) but implemented for real here because
+// render_path_tests needs a headless draw_mesh target with a readback path
+// (RenderAttachment for draw_mesh's own pass, CopySrc for the test's
+// CopyTextureToBuffer readback).
+RenderTarget get_render_target(uint32_t width, uint32_t height, Format format) {
+    RenderTarget rt = {};
+    wgpu::TextureDescriptor desc = {};
+    desc.size = {width, height, 1};
+    desc.format = to_wgpu(format);
+    desc.mipLevelCount = 1;
+    desc.usage = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::CopySrc;
+    rt.texture = g_ctx.device.CreateTexture(&desc);
+    rt.rt_view = rt.texture.CreateView();
+    rt.width = width; rt.height = height;
+    rt.is_window = false;
+    rt.format = format;
+    return rt;
+}
+
 // Acquire the surface texture for this frame if not already held.
 static wgpu::TextureView window_view() {
     if (!g_surface_tex_acquired) {
@@ -100,10 +165,12 @@ static wgpu::TextureView window_view() {
 
 void set_render_targets_viewport(RenderTarget *buffer) {
     // D3D11 version set OM targets + viewport. WebGPU render passes carry the
-    // target; viewport is full-target by default. Nothing to record until a
-    // clear or (M3) a draw — this call is intentionally a no-op that validates
-    // the argument shape.
-    (void)buffer;
+    // target; viewport is full-target by default (design §4 — no SetViewport
+    // call needed anywhere: the default viewport already spans the full
+    // color-attachment extent, matching "main.cpp never sets a
+    // partial/custom viewport"). Recording `g_render_target` here is the only
+    // way draw_mesh (which takes no target argument) knows where to render.
+    g_render_target = *buffer;
 }
 
 void clear_render_target(RenderTarget *buffer, float r, float g, float b, float a) {
@@ -140,6 +207,13 @@ void release() {
     g_clear3d = {};
     g_clear2d_f = {};
     g_clear2d_u = {};
+    // Render-path teardown (risk #7: cached wgpu::RenderPipeline handles must
+    // not silently outlive device teardown).
+    g_pipeline_cache.clear();
+    g_vertex_shader = nullptr;
+    g_pixel_shader = nullptr;
+    g_render_target = {};
+    for (uint32_t i = 0; i < MAX_SLOTS; i++) g_render_slots[i] = {};
     graphics_context = nullptr;
     // wgpu C++ handles are refcounted; dropping them tears down the device.
     g_ctx = {};
@@ -458,10 +532,25 @@ void clear_texture_uint(Texture2D *texture, uint32_t value) {
               (texture->width + 7) / 8, (texture->height + 7) / 8, 1);
 }
 
-void set_texture(Texture2D *t, uint32_t slot)  { (void)t; (void)slot; }
-void set_texture(Texture3D *t, uint32_t slot)  { (void)t; (void)slot; }
-void unset_texture(uint32_t slot)              { (void)slot; }
-void set_texture_sampler(TextureSampler *s, uint32_t slot) { (void)s; (void)slot; }
+void clear_structured_buffer(StructuredBuffer *buffer) {
+    ensure_encoder();
+    g_encoder.ClearBuffer(buffer->buffer, 0, buffer->size);
+}
+
+// Render bind convention (design §5): texture at slot N -> @group(1)
+// @binding(2N), sampler at slot N -> @binding(2N+1). This is the ONE place
+// the render path deliberately diverges from the compute path's
+// binding==slot convention — every render call site pairs a texture and its
+// sampler at the SAME slot number, so a literal binding==slot scheme would
+// put both at the same WGSL binding (a hard Dawn validation error). Each
+// render slot therefore stores an independent view AND sampler
+// simultaneously, unlike g_compute_slots' single-`kind` tagged union.
+void set_texture(Texture2D *t, uint32_t slot)  { assert(slot < MAX_SLOTS); g_render_slots[slot].view = t->sr_view; }
+void set_texture(Texture3D *t, uint32_t slot)  { assert(slot < MAX_SLOTS); g_render_slots[slot].view = t->sr_view; }
+// Clears .view only — samplers are never unset by main.cpp (design §5); they
+// stay bound and get overwritten next frame's set_texture_sampler call.
+void unset_texture(uint32_t slot)              { assert(slot < MAX_SLOTS); g_render_slots[slot].view = nullptr; }
+void set_texture_sampler(TextureSampler *s, uint32_t slot) { assert(slot < MAX_SLOTS); g_render_slots[slot].sampler = s->sampler; }
 
 void set_texture_compute(Texture2D *t, uint32_t slot)  { assert(slot < MAX_SLOTS); g_compute_slots[slot] = {}; g_compute_slots[slot].kind = BoundSlot::Kind::STORAGE_TEX; g_compute_slots[slot].view = t->ua_view; }
 void set_texture_compute(Texture3D *t, uint32_t slot)  { assert(slot < MAX_SLOTS); g_compute_slots[slot] = {}; g_compute_slots[slot].kind = BoundSlot::Kind::STORAGE_TEX; g_compute_slots[slot].view = t->ua_view; }
@@ -496,7 +585,196 @@ Mesh get_mesh(void *vertices, uint32_t vertex_count, uint32_t vertex_stride,
     return m;
 }
 
-void draw_mesh(Mesh *mesh) { (void)mesh; warn_once("draw_mesh"); }
+static wgpu::PrimitiveTopology to_wgpu_topology(Topology t) {
+    switch (t) {
+        case Topology::TRIANGLESTRIP: return wgpu::PrimitiveTopology::TriangleStrip;
+        case Topology::TRIANGLELIST:
+        default:                      return wgpu::PrimitiveTopology::TriangleList;
+    }
+}
+
+// Vertex layout table (design §3): exactly two vertex shapes exist in the
+// whole program. Explicit switch, not a generic format-inference/shader-
+// source parser (rejects reviving the D3D11 original's buggy
+// get_vertex_input_desc_from_shader tokenizer) — a third stride is a loud
+// fatal(), not a silent guess.
+static void fill_vertex_attributes(uint32_t stride, wgpu::VertexAttribute *attrs) {
+    switch (stride) {
+        case 24:
+            attrs[0] = {}; attrs[0].format = wgpu::VertexFormat::Float32x4;
+            attrs[0].offset = 0;  attrs[0].shaderLocation = 0;
+            attrs[1] = {}; attrs[1].format = wgpu::VertexFormat::Float32x2;
+            attrs[1].offset = 16; attrs[1].shaderLocation = 1;
+            return;
+        case 28:
+            attrs[0] = {}; attrs[0].format = wgpu::VertexFormat::Float32x4;
+            attrs[0].offset = 0;  attrs[0].shaderLocation = 0;
+            attrs[1] = {}; attrs[1].format = wgpu::VertexFormat::Float32x3;
+            attrs[1].offset = 16; attrs[1].shaderLocation = 1;
+            return;
+        default: {
+            char msg[128];
+            snprintf(msg, sizeof(msg), "draw_mesh: no vertex layout for stride %u", stride);
+            fatal(msg);
+        }
+    }
+}
+
+static wgpu::RenderPipeline build_pipeline(VertexShader *vs, PixelShader *ps,
+                                           BlendType blend, uint32_t stride,
+                                           Topology topology,
+                                           wgpu::TextureFormat target_format) {
+    wgpu::VertexAttribute attrs[2];
+    fill_vertex_attributes(stride, attrs);
+
+    wgpu::VertexBufferLayout vbuf_layout = {};
+    vbuf_layout.arrayStride = stride;
+    vbuf_layout.stepMode = wgpu::VertexStepMode::Vertex;
+    vbuf_layout.attributeCount = 2;
+    vbuf_layout.attributes = attrs;
+
+    wgpu::VertexState vertex_state = {};
+    vertex_state.module = vs->module;
+    vertex_state.bufferCount = 1;
+    vertex_state.buffers = &vbuf_layout;
+
+    // Blend mapping (design §2b, from the D3D11 original's recorded
+    // behaviour): OPAQUE = disabled (blend=nullptr); ALPHA = src-alpha/
+    // inv-src-alpha on color, same formula on alpha (documented guess — the
+    // alpha-channel op wasn't independently recorded, but is unobservable in
+    // M3 since ps_particles_color always writes a=1.0; risk #6).
+    wgpu::BlendState blend_state = {};
+    blend_state.color = {wgpu::BlendOperation::Add, wgpu::BlendFactor::SrcAlpha,
+                         wgpu::BlendFactor::OneMinusSrcAlpha};
+    blend_state.alpha = {wgpu::BlendOperation::Add, wgpu::BlendFactor::SrcAlpha,
+                         wgpu::BlendFactor::OneMinusSrcAlpha};
+
+    wgpu::ColorTargetState color_target = {};
+    color_target.format = target_format;  // window => BGRA8UnormSrgb (window_view()'s
+    // format); offscreen => RenderTarget::format (see PipelineCacheEntry's
+    // comment for why this isn't hardcoded).
+    color_target.blend = (blend == BlendType::ALPHA) ? &blend_state : nullptr;
+
+    wgpu::FragmentState fragment_state = {};
+    fragment_state.module = ps->module;
+    fragment_state.targetCount = 1;
+    fragment_state.targets = &color_target;
+
+    wgpu::RenderPipelineDescriptor desc = {};
+    desc.vertex = vertex_state;
+    desc.fragment = &fragment_state;
+    desc.primitive.topology = to_wgpu_topology(topology);
+    desc.depthStencil = nullptr;   // depth out of scope for M3/M4 (design §7)
+
+    g_ctx.device.PushErrorScope(wgpu::ErrorFilter::Validation);
+    wgpu::RenderPipeline pipeline = g_ctx.device.CreateRenderPipeline(&desc);
+    bool done = false, had_error = false;
+    g_ctx.device.PopErrorScope(
+        wgpu::CallbackMode::AllowProcessEvents,
+        [&done, &had_error](wgpu::PopErrorScopeStatus, wgpu::ErrorType type,
+                            wgpu::StringView message) {
+            if (type != wgpu::ErrorType::NoError) {
+                had_error = true;
+                fprintf(stderr, "[graphics] render pipeline error: %.*s\n",
+                        (int)message.length, message.data);
+            }
+            done = true;
+        });
+    wait_for(&done);
+    if (had_error) {
+        fatal("draw_mesh: render pipeline creation failed for the current "
+              "vertex/pixel shader pair (see Dawn validation error above)");
+    }
+    return pipeline;
+}
+
+void draw_mesh(Mesh *mesh) {
+    assert(g_vertex_shader && g_vertex_shader->valid && g_pixel_shader && g_pixel_shader->valid);
+
+    // Lazy pipeline cache (design §2): linear scan on .Get() pointer
+    // equality. Cache key omits depth-attachment presence (constant: never
+    // bound, §7) but DOES include target format — see g_pipeline_cache's
+    // declaration comment for why that widens design §2's original proposal.
+    WGPUShaderModule vs_key = g_vertex_shader->module.Get();
+    WGPUShaderModule ps_key = g_pixel_shader->module.Get();
+    // Target format: the window's fixed sRGB BGRA8 view (matches
+    // window_view()) for the window target, else the offscreen
+    // RenderTarget's own format (see PipelineCacheEntry's comment).
+    wgpu::TextureFormat target_format = g_render_target.is_window
+        ? wgpu::TextureFormat::BGRA8UnormSrgb
+        : to_wgpu(g_render_target.format);
+    wgpu::RenderPipeline pipeline;
+    for (auto &entry : g_pipeline_cache) {
+        if (entry.vs == vs_key && entry.ps == ps_key && entry.blend == g_blend &&
+            entry.stride == mesh->vertex_stride && entry.target_format == target_format) {
+            pipeline = entry.pipeline;
+            break;
+        }
+    }
+    if (!pipeline) {
+        pipeline = build_pipeline(g_vertex_shader, g_pixel_shader, g_blend,
+                                  mesh->vertex_stride, mesh->topology, target_format);
+        PipelineCacheEntry entry;
+        entry.vs = vs_key; entry.ps = ps_key; entry.blend = g_blend;
+        entry.stride = mesh->vertex_stride; entry.target_format = target_format;
+        entry.pipeline = pipeline;
+        g_pipeline_cache.push_back(entry);
+    }
+
+    // Bind group 0 (uniform), only if either stage declares @group(0) —
+    // mirrors run_compute's uses_group0 gate exactly (design §5). Stage
+    // visibility comes free from the pipeline's auto bind-group-layout.
+    wgpu::BindGroup group0;
+    bool needs_group0 = g_vertex_shader->uses_group0 || g_pixel_shader->uses_group0;
+    if (needs_group0) {
+        if (!g_uniform_buffer) {
+            fatal("draw_mesh: shader declares @group(0) uniform but no constant buffer is bound (set_constant_buffer slot 0)");
+        }
+        wgpu::BindGroupEntry e = {};
+        e.binding = 0; e.buffer = g_uniform_buffer; e.size = g_uniform_size;
+        wgpu::BindGroupDescriptor d = {};
+        d.layout = pipeline.GetBindGroupLayout(0);
+        d.entryCount = 1; d.entries = &e;
+        group0 = g_ctx.device.CreateBindGroup(&d);
+    }
+
+    // Bind group 1: textures/samplers by the 2N/2N+1 convention (design §5).
+    std::vector<wgpu::BindGroupEntry> entries;
+    for (uint32_t slot = 0; slot < MAX_SLOTS; slot++) {
+        const RenderSlot &s = g_render_slots[slot];
+        if (s.view) {
+            wgpu::BindGroupEntry e = {};
+            e.binding = 2 * slot; e.textureView = s.view;
+            entries.push_back(e);
+        }
+        if (s.sampler) {
+            wgpu::BindGroupEntry e = {};
+            e.binding = 2 * slot + 1; e.sampler = s.sampler;
+            entries.push_back(e);
+        }
+    }
+    wgpu::BindGroupDescriptor d1 = {};
+    d1.layout = pipeline.GetBindGroupLayout(1);
+    d1.entryCount = entries.size(); d1.entries = entries.data();
+    wgpu::BindGroup group1 = g_ctx.device.CreateBindGroup(&d1);
+
+    ensure_encoder();
+    wgpu::TextureView view = g_render_target.is_window ? window_view() : g_render_target.rt_view;
+    wgpu::RenderPassColorAttachment att = {};
+    att.view = view;
+    att.loadOp = wgpu::LoadOp::Load;    // preserve the prior clear/draw (design §4)
+    att.storeOp = wgpu::StoreOp::Store;
+    wgpu::RenderPassDescriptor pass_desc = {};
+    pass_desc.colorAttachmentCount = 1;
+    pass_desc.colorAttachments = &att;
+    wgpu::RenderPassEncoder pass = g_encoder.BeginRenderPass(&pass_desc);
+    pass.SetPipeline(pipeline);
+    if (group0) pass.SetBindGroup(0, group0);
+    pass.SetBindGroup(1, group1);
+    pass.SetVertexBuffer(0, mesh->vertex_buffer);
+    pass.Draw(mesh->vertex_count);
+    pass.End();
+}
 
 void set_structured_buffer(StructuredBuffer *b, uint32_t slot) { assert(slot < MAX_SLOTS); g_compute_slots[slot] = {}; g_compute_slots[slot].kind = BoundSlot::Kind::STORAGE_BUFFER; g_compute_slots[slot].buffer = b->buffer; g_compute_slots[slot].buffer_size = b->size; }
 
@@ -538,14 +816,79 @@ void capture_structured_buffer(StructuredBuffer *buffer, void *mapped_data,
     buffer->readback.Unmap();
 }
 
+// Mirrors get_compute_shader_from_code's error-scope validation pattern
+// exactly (PushErrorScope -> CreateShaderModule -> PopErrorScope callback ->
+// wait_for -> valid = !had_error). Each compiles ONE file with ONE entry
+// point named `main` (@vertex or @fragment) — vs and ps stay in separate
+// files/modules (design §1); wgpu::RenderPipelineDescriptor natively accepts
+// two distinct ShaderModules, so no call-site restructuring is needed.
+//
+// NOTE on `is_ready`: for render shaders this means "this WGSL module
+// compiled," a WEAKER guarantee than compute's "pipeline built" (design §1).
+// CreateShaderModule only proves the WGSL parses/type-checks in isolation —
+// it does NOT prove compatibility with a specific vertex-buffer stride,
+// blend target format, or its paired stage. Those errors surface only at
+// draw_mesh's CreateRenderPipeline call, necessarily later, because stride/
+// blend/format aren't known until a Mesh is drawn.
 VertexShader get_vertex_shader_from_code(char *code, uint32_t code_length) {
-    (void)code; (void)code_length;
-    VertexShader vs = {}; vs.valid = true;   // M3 compiles real WGSL here
+    (void)code_length;
+    g_ctx.device.PushErrorScope(wgpu::ErrorFilter::Validation);
+
+    wgpu::ShaderSourceWGSL src = {};
+    src.code = code;
+    wgpu::ShaderModuleDescriptor mod_desc = {};
+    mod_desc.nextInChain = &src;
+    wgpu::ShaderModule module = g_ctx.device.CreateShaderModule(&mod_desc);
+
+    bool done = false, had_error = false;
+    g_ctx.device.PopErrorScope(
+        wgpu::CallbackMode::AllowProcessEvents,
+        [&done, &had_error](wgpu::PopErrorScopeStatus, wgpu::ErrorType type,
+                            wgpu::StringView message) {
+            if (type != wgpu::ErrorType::NoError) {
+                had_error = true;
+                fprintf(stderr, "[graphics] vertex shader error: %.*s\n",
+                        (int)message.length, message.data);
+            }
+            done = true;
+        });
+    wait_for(&done);
+
+    VertexShader vs = {};
+    vs.module = module;
+    vs.valid = !had_error;
+    vs.uses_group0 = (strstr(code, "@group(0)") != NULL);
     return vs;
 }
+
 PixelShader get_pixel_shader_from_code(char *code, uint32_t code_length) {
-    (void)code; (void)code_length;
-    PixelShader ps = {}; ps.valid = true;
+    (void)code_length;
+    g_ctx.device.PushErrorScope(wgpu::ErrorFilter::Validation);
+
+    wgpu::ShaderSourceWGSL src = {};
+    src.code = code;
+    wgpu::ShaderModuleDescriptor mod_desc = {};
+    mod_desc.nextInChain = &src;
+    wgpu::ShaderModule module = g_ctx.device.CreateShaderModule(&mod_desc);
+
+    bool done = false, had_error = false;
+    g_ctx.device.PopErrorScope(
+        wgpu::CallbackMode::AllowProcessEvents,
+        [&done, &had_error](wgpu::PopErrorScopeStatus, wgpu::ErrorType type,
+                            wgpu::StringView message) {
+            if (type != wgpu::ErrorType::NoError) {
+                had_error = true;
+                fprintf(stderr, "[graphics] pixel shader error: %.*s\n",
+                        (int)message.length, message.data);
+            }
+            done = true;
+        });
+    wait_for(&done);
+
+    PixelShader ps = {};
+    ps.module = module;
+    ps.valid = !had_error;
+    ps.uses_group0 = (strstr(code, "@group(0)") != NULL);
     return ps;
 }
 
@@ -598,8 +941,8 @@ ComputeShader get_compute_shader_from_code(char *code, uint32_t code_length,
     return cs;
 }
 
-void set_vertex_shader(VertexShader *shader) { (void)shader; }
-void set_pixel_shader(PixelShader *shader)   { (void)shader; }
+void set_vertex_shader(VertexShader *shader) { g_vertex_shader = shader; }
+void set_pixel_shader(PixelShader *shader)   { g_pixel_shader = shader; }
 
 void set_compute_shader(ComputeShader *shader) {
     g_compute_shader = shader;

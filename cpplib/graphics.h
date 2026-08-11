@@ -37,6 +37,13 @@ struct RenderTarget {
     wgpu::TextureView rt_view;   // null when is_window
     uint32_t width = 0, height = 0;
     bool is_window = false;
+    // UNKNOWN for the window target (its format is the fixed sRGB BGRA8 view
+    // hardcoded at draw_mesh time, matching window_view()); set by
+    // get_render_target() for offscreen targets, whose format draw_mesh's
+    // pipeline-cache key must account for (M3 Task 1: render_path_tests
+    // draws into a non-window-format offscreen RT — see graphics.cpp's
+    // draw_mesh comment for why the pipeline format axis isn't hardcoded).
+    Format format = Format::UNKNOWN;
 };
 
 struct DepthBuffer {             // created by main.cpp but never bound (inventory §4)
@@ -77,8 +84,12 @@ struct StructuredBuffer {
     uint32_t element_stride = 0, num_elements = 0, size = 0;
 };
 
-struct VertexShader  { wgpu::ShaderModule module; bool valid = false; }; // M2a: stub module
-struct PixelShader   { wgpu::ShaderModule module; bool valid = false; }; // M2a: stub module
+// M3: real compiled modules. `valid` means "this WGSL module compiled" —
+// weaker than ComputeShader::valid ("pipeline built"), since stride/blend/
+// target-format compatibility can only be checked at draw_mesh time, once a
+// Mesh and the current blend/target state are known (render-path-design.md §1).
+struct VertexShader  { wgpu::ShaderModule module; bool valid = false; bool uses_group0 = false; };
+struct PixelShader   { wgpu::ShaderModule module; bool valid = false; bool uses_group0 = false; };
 struct ComputeShader { wgpu::ComputePipeline pipeline; bool valid = false; bool uses_group0 = false; };
 
 // Named override constants passed at compute-pipeline creation (quirk toggles,
@@ -93,6 +104,11 @@ void release();                         // teardown, last call
 
 // ---- render targets / clears ----
 RenderTarget get_render_target_window();
+// M3: real offscreen render target (RenderAttachment|CopySrc texture + view).
+// Never called by main.cpp (inventory: all "offscreen" buffers are compute-
+// written textures, not render targets) but is part of the 39-function
+// surface and is how render_path_tests exercises draw_mesh headlessly.
+RenderTarget get_render_target(uint32_t width, uint32_t height, Format format);
 DepthBuffer get_depth_buffer(uint32_t width, uint32_t height);
 void set_render_targets_viewport(RenderTarget *buffer);
 void clear_render_target(RenderTarget *buffer, float r, float g, float b, float a);
@@ -111,6 +127,7 @@ uint32_t capture_current_frame();                               // M2a: stub (M5
 void clear_texture(Texture3D *texture, float value);
 void clear_texture(Texture2D *texture, float value);
 void clear_texture_uint(Texture2D *texture, uint32_t value);
+void clear_structured_buffer(StructuredBuffer *buffer);   // zero-fills; GPU-side ClearBuffer
 
 // ---- binding: render stage (M2a: stubs, real in M3) ----
 void set_texture(Texture2D *texture, uint32_t slot);
