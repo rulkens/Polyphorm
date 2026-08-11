@@ -1277,7 +1277,8 @@ int main(int argc, char **argv)
                     } else {
                         graphics::set_texture_sampled_compute(&trail_tex_B, 2);
                     }
-                    graphics::set_texture_sampler(&tex_sampler_deposit, 2);
+                    // upstream typo: render-stage call in compute bind block — see m3/m4 carryovers
+                    graphics::set_texture_sampler_compute(&tex_sampler_deposit, 2);
                     graphics::set_texture_sampled_compute(&palette_trace_tex, 3);
                     graphics::set_texture_sampler_compute(&tex_sampler_color_palette, 3);
                     graphics::set_texture_sampled_compute(&palette_data_tex, 4);

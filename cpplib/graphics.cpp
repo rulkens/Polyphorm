@@ -18,14 +18,24 @@ static BlendType g_blend = BlendType::OPAQUE;
 
 // Compute binding shadow state (Task 5 consumes):
 struct BoundSlot {
-    enum class Kind { NONE, STORAGE_BUFFER, STORAGE_TEX, SAMPLED_TEX, SAMPLER } kind = Kind::NONE;
+    enum class Kind { NONE, STORAGE_BUFFER, STORAGE_TEX, SAMPLED_TEX } kind = Kind::NONE;
     wgpu::Buffer buffer;
     uint64_t buffer_size = 0;
     wgpu::TextureView view;
-    wgpu::Sampler sampler;
 };
 static const uint32_t MAX_SLOTS = 16;
 static BoundSlot g_compute_slots[MAX_SLOTS];
+// Independent per-slot compute-sampler storage (DESIGN §6.3): a sampled
+// texture (g_compute_slots[slot], Kind::SAMPLED_TEX) and its paired sampler
+// must coexist at the same slot number — cs_volpath's WGSL binds both a
+// texture_2d and a sampler at the same logical slot. Storing the sampler in
+// BoundSlot itself (the pre-fix shape) meant set_texture_sampler_compute's
+// `g_compute_slots[slot] = {}` reset erased whichever resource had just been
+// written to that slot, and vice versa. Compute samplers bind at
+// @group(1) @binding(MAX_SLOTS + slot) = 16 + N: resources keep binding==slot
+// so all pre-M4 shaders are unchanged; cs_volpath's WGSL (M4b) declares
+// @binding(17/19/20) for its s1/s3/s4 samplers.
+static wgpu::Sampler g_compute_samplers[MAX_SLOTS];
 static wgpu::Buffer g_uniform_buffer;            // group 0 binding 0
 static uint64_t g_uniform_size = 0;
 static ComputeShader *g_compute_shader = nullptr;
@@ -65,6 +75,12 @@ struct PipelineCacheEntry {
     BlendType blend = BlendType::OPAQUE;
     uint32_t stride = 0;
     wgpu::TextureFormat target_format = wgpu::TextureFormat::Undefined;
+    // DESIGN §6.4: folded into the key (previously omitted, a comment-only
+    // caveat) — TRIANGLESTRIP is currently unused by any shipped shader so
+    // this was latent, but a cache hit that silently reused a TRIANGLELIST
+    // pipeline for a TRIANGLESTRIP mesh (same vs/ps/blend/stride/format)
+    // would be a real, hard-to-diagnose bug once TRIANGLESTRIP is exercised.
+    Topology topology = Topology::TRIANGLELIST;
     wgpu::RenderPipeline pipeline;
 };
 static std::vector<PipelineCacheEntry> g_pipeline_cache;
@@ -201,7 +217,7 @@ void swap_frames() {
 void release() {
     flush_commands();
     g_uniform_buffer = nullptr;
-    for (uint32_t i = 0; i < MAX_SLOTS; i++) g_compute_slots[i] = {};
+    for (uint32_t i = 0; i < MAX_SLOTS; i++) { g_compute_slots[i] = {}; g_compute_samplers[i] = nullptr; }
     g_compute_shader = nullptr;
     g_blend = BlendType::OPAQUE;
     g_clear3d = {};
@@ -540,25 +556,45 @@ void clear_structured_buffer(StructuredBuffer *buffer) {
 // Render bind convention (design §5): texture at slot N -> @group(1)
 // @binding(2N), sampler at slot N -> @binding(2N+1). This is the ONE place
 // the render path deliberately diverges from the compute path's
-// binding==slot convention — every render call site pairs a texture and its
-// sampler at the SAME slot number, so a literal binding==slot scheme would
-// put both at the same WGSL binding (a hard Dawn validation error). Each
-// render slot therefore stores an independent view AND sampler
-// simultaneously, unlike g_compute_slots' single-`kind` tagged union.
+// binding==slot(+MAX_SLOTS for samplers, DESIGN §6.3) convention — every
+// render call site pairs a texture and its sampler at the SAME slot number,
+// so a literal binding==slot scheme would put both at the same WGSL binding
+// (a hard Dawn validation error). Each render slot stores an independent
+// view AND sampler together in one RenderSlot struct; the compute path
+// achieves the same texture/sampler independence via two separate parallel
+// arrays (g_compute_slots' single-`kind` tagged union for the resource part,
+// g_compute_samplers for the sampler part) rather than a combined struct —
+// an implementation-detail difference, not a semantic one.
 void set_texture(Texture2D *t, uint32_t slot)  { assert(slot < MAX_SLOTS); g_render_slots[slot].view = t->sr_view; }
 void set_texture(Texture3D *t, uint32_t slot)  { assert(slot < MAX_SLOTS); g_render_slots[slot].view = t->sr_view; }
-// Clears .view only — samplers are never unset by main.cpp (design §5); they
-// stay bound and get overwritten next frame's set_texture_sampler call.
-void unset_texture(uint32_t slot)              { assert(slot < MAX_SLOTS); g_render_slots[slot].view = nullptr; }
+// Clears BOTH .view and .sampler (DESIGN §6.1 / I1a). Previously this only
+// cleared .view, leaving a stale sampler-only entry in the slot; the next
+// draw_mesh call would still emit a bind-group entry at binding 2N+1 for
+// that slot even though no texture is bound there, poisoning bind group 1
+// for any pixel shader that doesn't declare a matching sampler binding — a
+// hard Dawn validation error. No caller ever wants to unset a texture while
+// keeping its sampler bound, so both fields are cleared together.
+void unset_texture(uint32_t slot)              { assert(slot < MAX_SLOTS); g_render_slots[slot].view = nullptr; g_render_slots[slot].sampler = nullptr; }
 void set_texture_sampler(TextureSampler *s, uint32_t slot) { assert(slot < MAX_SLOTS); g_render_slots[slot].sampler = s->sampler; }
 
+// Resource setters write ONLY the resource part of the slot (kind/buffer/
+// view) — the paired sampler (if any) at g_compute_samplers[slot] survives
+// untouched, so set_texture_sampled_compute + set_texture_sampler_compute can
+// be called in either order without one erasing the other (DESIGN §6.3).
 void set_texture_compute(Texture2D *t, uint32_t slot)  { assert(slot < MAX_SLOTS); g_compute_slots[slot] = {}; g_compute_slots[slot].kind = BoundSlot::Kind::STORAGE_TEX; g_compute_slots[slot].view = t->ua_view; }
 void set_texture_compute(Texture3D *t, uint32_t slot)  { assert(slot < MAX_SLOTS); g_compute_slots[slot] = {}; g_compute_slots[slot].kind = BoundSlot::Kind::STORAGE_TEX; g_compute_slots[slot].view = t->ua_view; }
 void set_texture_sampled_compute(Texture2D *t, uint32_t slot) { assert(slot < MAX_SLOTS); g_compute_slots[slot] = {}; g_compute_slots[slot].kind = BoundSlot::Kind::SAMPLED_TEX; g_compute_slots[slot].view = t->sr_view; }
 void set_texture_sampled_compute(Texture3D *t, uint32_t slot) { assert(slot < MAX_SLOTS); g_compute_slots[slot] = {}; g_compute_slots[slot].kind = BoundSlot::Kind::SAMPLED_TEX; g_compute_slots[slot].view = t->sr_view; }
-void set_texture_sampler_compute(TextureSampler *s, uint32_t slot) { assert(slot < MAX_SLOTS); g_compute_slots[slot] = {}; g_compute_slots[slot].kind = BoundSlot::Kind::SAMPLER; g_compute_slots[slot].sampler = s->sampler; }
+// Writes ONLY the sampler field — no longer zeroes the resource part of the
+// slot (the pre-fix bug: this used to reset g_compute_slots[slot], erasing
+// whatever set_texture_sampled_compute had just written there).
+void set_texture_sampler_compute(TextureSampler *s, uint32_t slot) { assert(slot < MAX_SLOTS); g_compute_samplers[slot] = s->sampler; }
 void unset_texture_compute(uint32_t slot)          { assert(slot < MAX_SLOTS); g_compute_slots[slot] = {}; }
-void unset_texture_sampled_compute(uint32_t slot)  { assert(slot < MAX_SLOTS); g_compute_slots[slot] = {}; }
+// graphics.h has no dedicated compute-sampler-unset function, so this clears
+// BOTH the resource and sampler fields of the slot — mirroring unset_texture's
+// render-side rationale (I1a): no caller ever separates unsetting a sampled
+// texture from unsetting its paired sampler.
+void unset_texture_sampled_compute(uint32_t slot)  { assert(slot < MAX_SLOTS); g_compute_slots[slot] = {}; g_compute_samplers[slot] = nullptr; }
 
 
 void set_blend_state(BlendType type) {
@@ -706,7 +742,8 @@ void draw_mesh(Mesh *mesh) {
     wgpu::RenderPipeline pipeline;
     for (auto &entry : g_pipeline_cache) {
         if (entry.vs == vs_key && entry.ps == ps_key && entry.blend == g_blend &&
-            entry.stride == mesh->vertex_stride && entry.target_format == target_format) {
+            entry.stride == mesh->vertex_stride && entry.target_format == target_format &&
+            entry.topology == mesh->topology) {
             pipeline = entry.pipeline;
             break;
         }
@@ -717,6 +754,7 @@ void draw_mesh(Mesh *mesh) {
         PipelineCacheEntry entry;
         entry.vs = vs_key; entry.ps = ps_key; entry.blend = g_blend;
         entry.stride = mesh->vertex_stride; entry.target_format = target_format;
+        entry.topology = mesh->topology;
         entry.pipeline = pipeline;
         g_pipeline_cache.push_back(entry);
     }
@@ -981,9 +1019,18 @@ void run_compute(int gx, int gy, int gz) {
             case BoundSlot::Kind::STORAGE_BUFFER: e.buffer = s.buffer; e.size = s.buffer_size; break;
             case BoundSlot::Kind::STORAGE_TEX:
             case BoundSlot::Kind::SAMPLED_TEX:    e.textureView = s.view; break;
-            case BoundSlot::Kind::SAMPLER:        e.sampler = s.sampler; break;
             default: break;
         }
+        entries.push_back(e);
+    }
+    // Compute samplers bind at MAX_SLOTS + slot: resources keep binding==slot
+    // so all pre-M4 shaders are unchanged; cs_volpath's WGSL (M4b) declares
+    // @binding(17/19/20) for its s1/s3/s4 samplers.
+    for (uint32_t i = 0; i < MAX_SLOTS; i++) {
+        if (!g_compute_samplers[i]) continue;
+        wgpu::BindGroupEntry e = {};
+        e.binding = MAX_SLOTS + i;
+        e.sampler = g_compute_samplers[i];
         entries.push_back(e);
     }
     wgpu::BindGroupDescriptor d1 = {};

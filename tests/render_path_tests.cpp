@@ -260,6 +260,108 @@ static void test_offscreen_draw_and_readback() {
     graphics::release(&rt);
 }
 
+// ---- Test 2b (Task 1 / DESIGN §6.1, I1a): unset_texture must clear BOTH
+// the view AND the sampler at that slot ----
+//
+// Pre-fix, unset_texture(slot) only cleared g_render_slots[slot].view,
+// leaving a stale .sampler behind. draw_mesh's bind-group-1 builder emits a
+// bind-group entry for ANY slot with a non-null .view OR .sampler
+// (graphics.cpp's "Bind group 1" comment) -- so a lingering sampler-only
+// entry at an otherwise-unused slot would still land in the bind group at
+// binding 2*slot+1, which the slot-0-only SAMPLE_PS_WGSL shader (declaring
+// ONLY bindings 0/1) does not declare. That's a hard Dawn bind-group/
+// pipeline-layout mismatch -- reproduced here with an explicit
+// PushErrorScope/PopErrorScope around the draw, since the device's
+// uncaptured-error callback (gpu_context.cpp) only logs by default and would
+// not otherwise fail this test.
+//
+// Constructed to genuinely fail pre-fix per the brief: slot 1 gets BOTH a
+// view and a sampler bound, then unset_texture(1) is called, then the draw
+// uses the slot-0-only shader -- exactly the shape that leaves a poisoned
+// sampler-only entry behind pre-fix.
+static void test_unset_texture_clears_sampler() {
+    const uint32_t RT_W = 4, RT_H = 4;
+    graphics::RenderTarget rt =
+        graphics::get_render_target(RT_W, RT_H, graphics::Format::RGBA32_FLOAT);
+    assert(graphics::is_ready(&rt));
+    graphics::set_render_targets_viewport(&rt);
+    graphics::clear_render_target(&rt, 0.0f, 0.0f, 0.0f, 1.0f);
+
+    const uint32_t TEX_W = 4, TEX_H = 4;
+    graphics::Texture2D tex0 =
+        graphics::get_texture2D(nullptr, TEX_W, TEX_H, graphics::Format::RGBA32_FLOAT);
+    assert(graphics::is_ready(&tex0));
+    graphics::clear_texture(&tex0, 0.25f);
+    graphics::Texture2D tex1 =
+        graphics::get_texture2D(nullptr, TEX_W, TEX_H, graphics::Format::RGBA32_FLOAT);
+    assert(graphics::is_ready(&tex1));
+    graphics::clear_texture(&tex1, 0.75f);
+
+    graphics::TextureSampler samp0 = graphics::get_texture_sampler();
+    graphics::TextureSampler samp1 = graphics::get_texture_sampler();
+    assert(graphics::is_ready(&samp0));
+    assert(graphics::is_ready(&samp1));
+
+    // Fresh shader modules (own pipeline-cache entry from Test 2's) -- same
+    // slot-0-only SAMPLE_PS_WGSL source.
+    graphics::VertexShader vs =
+        graphics::get_vertex_shader_from_code((char *)QUAD_VS_WGSL, (uint32_t)strlen(QUAD_VS_WGSL));
+    graphics::PixelShader ps =
+        graphics::get_pixel_shader_from_code((char *)SAMPLE_PS_WGSL, (uint32_t)strlen(SAMPLE_PS_WGSL));
+    assert(graphics::is_ready(&vs));
+    assert(graphics::is_ready(&ps));
+
+    graphics::set_vertex_shader(&vs);
+    graphics::set_pixel_shader(&ps);
+
+    // Slot 0: the shader's real, declared texture/sampler pair.
+    graphics::set_texture(&tex0, 0);
+    graphics::set_texture_sampler(&samp0, 0);
+    // Slot 1: an UNUSED slot (SAMPLE_PS_WGSL declares no binding 2/3) --
+    // bind BOTH view and sampler, then unset. Pre-fix this leaves the
+    // sampler behind.
+    graphics::set_texture(&tex1, 1);
+    graphics::set_texture_sampler(&samp1, 1);
+    graphics::unset_texture(1);
+
+    graphics::Mesh quad = graphics::get_mesh(quad_vertices, quad_vertices_count,
+                                             quad_vertices_stride, NULL, 0, 0);
+    assert(graphics::is_ready(&quad));
+    graphics::set_blend_state(graphics::BlendType::OPAQUE);
+
+    bool had_error = false, popped = false;
+    graphics_context->device.PushErrorScope(wgpu::ErrorFilter::Validation);
+    graphics::draw_mesh(&quad);
+    graphics_context->device.PopErrorScope(
+        wgpu::CallbackMode::AllowProcessEvents,
+        [&had_error, &popped](wgpu::PopErrorScopeStatus, wgpu::ErrorType type,
+                              wgpu::StringView message) {
+            if (type != wgpu::ErrorType::NoError) {
+                had_error = true;
+                fprintf(stderr, "render_path_tests: unset_texture-clears-sampler test: "
+                                "%.*s\n", (int)message.length, message.data);
+            }
+            popped = true;
+        });
+    wait_for(&popped);
+    graphics::swap_frames();
+
+    assert(!had_error && "unset_texture(1) must clear the sampler too -- a stale "
+                         "sampler-only entry at an unused slot must not poison "
+                         "the bind group (DESIGN §6.1 / I1a)");
+    printf("render_path_tests: unset_texture clears sampler (I1a) passed\n");
+
+    graphics::unset_texture(0);
+    graphics::release(&quad);
+    graphics::release(&vs);
+    graphics::release(&ps);
+    graphics::release(&samp0);
+    graphics::release(&samp1);
+    graphics::release(&tex0);
+    graphics::release(&tex1);
+    graphics::release(&rt);
+}
+
 // ---- Test 3: @group(0)-declaring shader pair with no uniform bound ----
 //
 // Per the design (§5) and draw_mesh's step 3, a shader pair where either
@@ -554,13 +656,86 @@ static void test_particle_chain_pixels_exist() {
     graphics::release(&cfg_buf);
 }
 
+// ---- Test 5 (Task 1 / DESIGN §6.3): compute texture+sampler pairing at the
+// same slot, end-to-end through the 16+N sampler binding scheme ----
+//
+// Minimal kernel matching the brief exactly: texture_2d<f32> at
+// @group(1) @binding(1) (slot 1, binding == slot, unchanged), sampler at
+// @group(1) @binding(17) (MAX_SLOTS + slot = 16 + 1), storage buffer at
+// @group(1) @binding(0) (slot 0). Bound via
+// set_texture_sampled_compute(&tex, 1) + set_texture_sampler_compute(&samp, 1)
+// + set_structured_buffer(&out, 0) -- exactly the call order main.cpp's
+// VM_PATH_TRACING block uses for cs_volpath's slots 1/3/4 (M4b).
+//
+// Pre-fix, set_texture_sampled_compute and set_texture_sampler_compute both
+// reset the WHOLE slot (`g_compute_slots[slot] = {}`) before writing their
+// own field: calling them back-to-back at slot 1 left only the LAST call's
+// write behind, so the sampler call would erase the texture that was just
+// bound -- the shader's declared @binding(1) texture would go unbound (and
+// pre-fix there was no 16+N split at all, so even the sampler wouldn't land
+// at @binding(17)). Either way the sampled value would not be the texture's
+// known fill value; this test pins both the pairing fix and the 16+N scheme
+// by asserting the exact sampled value round-trips.
+static const char *COMPUTE_SAMPLER_PAIR_WGSL = R"(
+@group(1) @binding(0) var<storage, read_write> out_buf : array<f32>;
+@group(1) @binding(1) var tex : texture_2d<f32>;
+@group(1) @binding(17) var samp : sampler;
+
+@compute @workgroup_size(1)
+fn main() {
+    out_buf[0] = textureSampleLevel(tex, samp, vec2<f32>(0.5, 0.5), 0.0).x;
+}
+)";
+
+static void test_compute_sampler_pairing() {
+    graphics::Texture2D tex =
+        graphics::get_texture2D(nullptr, 1, 1, graphics::Format::RGBA32_FLOAT);
+    assert(graphics::is_ready(&tex));
+    graphics::clear_texture(&tex, 0.75f);
+
+    graphics::TextureSampler samp = graphics::get_texture_sampler();
+    assert(graphics::is_ready(&samp));
+
+    graphics::StructuredBuffer out_buf = graphics::get_structured_buffer(sizeof(float), 1);
+    assert(graphics::is_ready(&out_buf));
+    graphics::clear_structured_buffer(&out_buf);
+
+    graphics::ComputeShader cs = graphics::get_compute_shader_from_code(
+        (char *)COMPUTE_SAMPLER_PAIR_WGSL, (uint32_t)strlen(COMPUTE_SAMPLER_PAIR_WGSL));
+    assert(graphics::is_ready(&cs));
+
+    graphics::set_compute_shader(&cs);
+    graphics::set_structured_buffer(&out_buf, 0);
+    graphics::set_texture_sampled_compute(&tex, 1);
+    graphics::set_texture_sampler_compute(&samp, 1);
+    graphics::run_compute(1, 1, 1);
+    graphics::unset_structured_buffer(0);
+    graphics::unset_texture_sampled_compute(1);
+
+    float result[1] = {0.0f};
+    graphics::capture_structured_buffer(&out_buf, result, 1, sizeof(float));
+    assert(fabsf(result[0] - 0.75f) < 1e-4f &&
+          "textureSampleLevel must read the texture bound at slot 1 (binding 1) "
+          "through the sampler ALSO bound at slot 1 (binding 17) -- pairing + "
+          "16+N scheme, DESIGN §6.3");
+    printf("render_path_tests: compute texture+sampler pairing (16+N binding) "
+           "passed (sampled=%.4f)\n", result[0]);
+
+    graphics::release(&cs);
+    graphics::release(&out_buf);
+    graphics::release(&samp);
+    graphics::release(&tex);
+}
+
 int main() {
     bool ok = graphics::init();   // headless: no init_swap_chain
     assert(ok);
 
     test_shader_compile_validation();
     test_offscreen_draw_and_readback();
+    test_unset_texture_clears_sampler();
     test_particle_chain_pixels_exist();
+    test_compute_sampler_pairing();
 
     graphics::release();
     printf("All render path tests passed\n");

@@ -16,7 +16,12 @@ enum class Format {
                       // WebGPU's only read_write float storage format. Exact
                       // behavioural match in REGIME_SDSS (research notes §0).
     RGBA32_FLOAT,     // display_tex
-    R32_UINT,         // display_tex_uint (atomic splat target)
+    R32_UINT,         // stale-comment fix (DESIGN §6.5, m3-carryovers.md): the
+                      // `display_tex_uint` texture this once named was
+                      // deleted — particle splat accumulation is now a
+                      // StructuredBuffer of atomics (main.cpp:653), not a
+                      // texture. R32_UINT itself is still live: the
+                      // clear_texture_uint kernel's format (graphics.cpp).
     RGBA8_UNORM,
     RGBA8_UNORM_SRGB, // window view format (preserves the sRGB-over-UNORM quirk)
 };
