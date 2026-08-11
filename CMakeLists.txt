@@ -44,12 +44,13 @@ add_executable(polyphorm
   cpplib/platform.cpp
   cpplib/input.cpp
   cpplib/maths.cpp
-  # cpplib/memory.cpp         # enabled in M2
-  # cpplib/random.cpp         # enabled in M2
-  # cpplib/logging.cpp        # enabled in M2
+  cpplib/memory.cpp
+  cpplib/random.cpp
+  cpplib/logging.cpp
   cpplib/file_system.cpp
   cpplib/gpu/gpu_context.cpp
   cpplib/graphics.cpp
+  cpplib/ui_stub.cpp
 )
 target_include_directories(polyphorm PRIVATE cpplib)
 target_link_libraries(polyphorm PRIVATE webgpu_dawn webgpu_glfw glfw)
@@ -95,6 +96,7 @@ add_executable(graphics_tests
   cpplib/gpu/gpu_context.cpp
   cpplib/platform.cpp
   cpplib/input.cpp
+  cpplib/logging.cpp
 )
 target_compile_features(graphics_tests PRIVATE cxx_std_17)
 target_compile_definitions(graphics_tests PRIVATE

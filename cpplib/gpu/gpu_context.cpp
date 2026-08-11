@@ -1,5 +1,6 @@
 #include "gpu/gpu_context.h"
 #include "platform.h"
+#include "logging.h"
 #include <webgpu/webgpu_glfw.h>
 #include <GLFW/glfw3.h>
 #include <cstdio>
@@ -7,7 +8,7 @@
 
 namespace gpu {
 
-static void fatal(const char *what) {
+[[noreturn]] static void fatal(const char *what) {
     std::fprintf(stderr, "[gpu] FATAL: %s\n", what);
     std::abort();
 }
@@ -72,13 +73,13 @@ bool init_device(GpuContext *ctx) {
     dev_desc.requiredLimits = &required;
     dev_desc.SetUncapturedErrorCallback(
         [](const wgpu::Device &, wgpu::ErrorType type, wgpu::StringView msg) {
-            std::fprintf(stderr, "[gpu] uncaptured error (%d): %.*s\n",
+            logging::print("[gpu] uncaptured error (%d): %.*s",
                          (int)type, (int)msg.length, msg.data);
         });
     dev_desc.SetDeviceLostCallback(
         wgpu::CallbackMode::AllowSpontaneous,
         [](const wgpu::Device &, wgpu::DeviceLostReason reason, wgpu::StringView msg) {
-            std::fprintf(stderr, "[gpu] device lost (%d): %.*s\n",
+            logging::print("[gpu] device lost (%d): %.*s",
                          (int)reason, (int)msg.length, msg.data);
         });
 
@@ -102,7 +103,7 @@ bool init_device(GpuContext *ctx) {
     ctx->max_buffer_size = granted.maxBufferSize;
 
     // Log granted limits for debugging and Task 2b planning
-    std::fprintf(stderr, "[gpu] limits: workgroup_invocations=%u storage_binding=%llu MiB buffer=%llu MiB\n",
+    logging::print("[gpu] limits: workgroup_invocations=%u storage_binding=%llu MiB buffer=%llu MiB",
             ctx->max_workgroup_invocations,
             (unsigned long long)(ctx->max_storage_buffer_binding_size >> 20),
             (unsigned long long)(ctx->max_buffer_size >> 20));

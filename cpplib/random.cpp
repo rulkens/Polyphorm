@@ -1,5 +1,7 @@
 #include "random.h"
-#include <stdlib.h>
+
+// Forward declare C library rand() to avoid namespace conflict with random::
+extern "C" int rand(void);
 
 float random::uniform(float low, float high)
 {
