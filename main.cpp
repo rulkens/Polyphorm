@@ -4,7 +4,6 @@
 #include "maths.h"
 #include "memory.h"
 #include "ui.h"
-#include "font.h"
 #include "input.h"
 #include "random.h"
 #include <cassert>
@@ -711,7 +710,7 @@ int main(int argc, char **argv)
     rendering_config.scattering_anisotropy = 0.9;
     ConstantBuffer rendering_settings_buffer = graphics::get_constant_buffer(sizeof(RenderingConfig));
     graphics::update_constant_buffer(&rendering_settings_buffer, &rendering_config);
-    graphics::set_constant_buffer(&rendering_settings_buffer, 4);
+    // M3/M4: rendering config is bound per-dispatch at slot 0 (fork convention; upstream D3D11 bound it persistently at b4 — see docs/superpowers/research/m2/m2a-carryovers.md I3)
 
     // Assign default simulation parameters
     SimulationConfig simulation_config = {};
