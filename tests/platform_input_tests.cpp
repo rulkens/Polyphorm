@@ -1,5 +1,7 @@
 #include "platform.h"
 #include "input.h"
+#include "memory.h"
+#include "random.h"
 #include <cassert>
 #include <cstring>
 
@@ -11,6 +13,11 @@ static Event make_key_event(EventType type, KeyCode code) {
 }
 
 int main() {
+    // Regression: memory.h includes <cstdlib> which declares random() function.
+    // This TU includes both memory.h and random.h (rnd namespace) — if namespace
+    // collision regresses, this TU will fail to compile.
+    assert(rnd::uniform(0.0f, 1.0f) >= 0.0f);
+
     // Tick math: 2.5e9 ns at 1e9 Hz is 2.5 s.
     assert(platform::get_tick_frequency() == 1000000000ull);
     float dt = platform::get_dt_from_tick_difference(1000000000ull, 3500000000ull,

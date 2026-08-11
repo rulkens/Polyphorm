@@ -642,22 +642,22 @@ int main(int argc, char **argv)
             // These are free-flowing physarum agents
             else {
                 #ifdef AGENTS_INIT_AROUND_DATA // Initialize the agents around data points to speed up convergence
-                int random_data_index = (int)random::uniform(0.0, (float)(data_count-1));
+                int random_data_index = (int)rnd::uniform(0.0, (float)(data_count-1));
                 const float random_spread = 0.025;
-                float radius = random_spread * math::min(math::min(gx, gy), gz) * random::uniform();
-                float xi1 = random::uniform();
-                float xi2 = random::uniform();
+                float radius = random_spread * math::min(math::min(gx, gy), gz) * rnd::uniform();
+                float xi1 = rnd::uniform();
+                float xi2 = rnd::uniform();
                 px[i] = px[random_data_index] + radius * math::cos(math::PI2 * xi1) * math::sqrt(xi2 * (1.0-xi2));
                 py[i] = py[random_data_index] + radius * math::sin(math::PI2 * xi1) * math::sqrt(xi2 * (1.0-xi2));
                 pz[i] = pz[random_data_index] + 0.5 * radius * (1.0 - 2.0*xi2);
                 #endif
                 #ifdef AGENTS_INIT_RANDOMLY
-                px[i] = random::uniform(0.0, (float)gx);
-                py[i] = random::uniform(0.0, (float)gy);
-                pz[i] = random::uniform(0.0, (float)gz);
+                px[i] = rnd::uniform(0.0, (float)gx);
+                py[i] = rnd::uniform(0.0, (float)gy);
+                pz[i] = rnd::uniform(0.0, (float)gz);
                 #endif
-                pp[i] = random::uniform(0.0, math::PI2);
-                pt[i] = math::acos(2.0 * random::uniform(0.0, 1.0) - 1.0);
+                pp[i] = rnd::uniform(0.0, math::PI2);
+                pt[i] = math::acos(2.0 * rnd::uniform(0.0, 1.0) - 1.0);
                 pw[i] = 1.0;
             }
 

@@ -75,6 +75,7 @@ add_executable(cpplib_tests
   cpplib/platform.cpp
   cpplib/input.cpp
   cpplib/maths.cpp
+  cpplib/random.cpp
 )
 target_include_directories(cpplib_tests PRIVATE cpplib)
 target_link_libraries(cpplib_tests PRIVATE glfw)
