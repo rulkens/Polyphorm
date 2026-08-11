@@ -6,10 +6,12 @@
 // at draw_mesh time) headlessly. See docs/superpowers/research/m3/
 // render-path-design.md.
 #include "../cpplib/graphics.h"
+#include "../cpplib/file_system.h"
 #include <cassert>
 #include <cstdio>
 #include <cstring>
 #include <cmath>
+#include <vector>
 
 // ---- Test 1 shaders: trivial compile validation ----
 
@@ -272,12 +274,293 @@ static void test_offscreen_draw_and_readback() {
 // (uniform correctly omitted) path since QUAD_VS_WGSL/SAMPLE_PS_WGSL declare
 // no @group(0) at all.
 
+// ---- Test 4 (M3 Task 3): particle-chain pixels-exist test ----
+//
+// Mirrors main.cpp's VM_PARTICLES compute chain (cs_particles_transform ->
+// cs_particles_blit) headlessly on a 64x64 "screen", exactly the bind
+// discipline/order of main.cpp's VM_PARTICLES block, then reads back
+// display_tex and asserts:
+//   (a) at least one texel has nonzero red (the chain actually produced
+//       pixels), pinned further to the known center-particle pixel value;
+//   (b) the OOB write guard in cs_particles_transform.wgsl held: a particle
+//       deliberately placed at exactly x == screen_width must NOT corrupt
+//       the accumulation buffer's last element. Without the shader's
+//       explicit bounds guard, WGSL's storage-buffer OOB-index safety
+//       clamps (rather than discards) an out-of-range dynamic array index,
+//       which would land this particle's atomicAdd on the LAST buffer
+//       element instead of being dropped -- see cs_particles_transform.wgsl's
+//       "NEW REQUIRED GUARD" comment and translation-notes.md §0.1.
+//
+// Camera choice: identity view AND identity projection ("simple centered
+// ortho" per the M3 Task 3 brief) -- not merely orthographic, the full no-op
+// transform. Chosen because it makes the grid-space -> screen-space mapping
+// invertible by hand, so particles can be placed at exact, predictable
+// screen pixels (worked out below) without needing cpplib/maths.h linked
+// into this test binary.
+
+// RenderingConfig, duplicated byte-for-byte (see main.cpp:263-312 and its
+// static_assert at :313, and cs_particles_transform.wgsl / cs_particles_blit
+// .wgsl's `struct RenderingConfig`) using plain float[16] in place of
+// Matrix4x4 (both are 64 B column-major arrays; identity is representation-
+// agnostic) so this test doesn't need to link cpplib/maths.cpp.
+struct RenderingConfigTest {
+    float projection[16];
+    float view[16];
+    float model[16];
+
+    int32_t texcoord_map;
+    float trim_x_min;
+    float trim_x_max;
+    float trim_y_min;
+
+    float trim_y_max;
+    float trim_z_min;
+    float trim_z_max;
+    float trim_density;
+
+    float world_width;
+    float world_height;
+    float world_depth;
+    float screen_width;
+
+    float screen_height;
+    float sample_weight;
+    float optical_thickness;
+    float highlight_density;
+
+    float galaxy_weight;
+    float histogram_base;
+    float overdensity_threshold_low;
+    float overdensity_threshold_high;
+
+    float camera_x;
+    float camera_y;
+    float camera_z;
+    int32_t pt_iteration;
+
+    float sigma_s;
+    float sigma_a;
+    float sigma_e;
+    float trace_max;
+
+    float camera_offset_x;
+    float camera_offset_y;
+    float exposure;
+    int32_t n_bounces;
+
+    float ambient_trace;
+    int32_t compressive_accumulation;
+    float guiding_strength;
+    float scattering_anisotropy;
+};
+static_assert(sizeof(RenderingConfigTest) == 3 * 64 + 36 * 4, "RenderingConfigTest layout must match main.cpp's RenderingConfig / the WGSL cfg struct");
+
+static void set_identity16(float m[16]) {
+    for (int i = 0; i < 16; i++) m[i] = 0.0f;
+    m[0] = m[5] = m[10] = m[15] = 1.0f;
+}
+
+// Reads back an RGBA32_FLOAT Texture2D (not a RenderTarget -- display_tex is
+// a compute-storage-written texture, never a render target) into `out`
+// (width*height*4 floats). Same CopyTextureToBuffer/256-byte-row-padding
+// shape as readback_rgba32f above, operating on tex->texture directly.
+static void readback_texture2d_rgba32f(graphics::Texture2D *tex, uint32_t width, uint32_t height,
+                                       float *out) {
+    const uint32_t unpadded_bytes_per_row = width * 4 * sizeof(float);
+    const uint32_t padded_bytes_per_row = (unpadded_bytes_per_row + 255u) & ~255u;
+    const uint64_t buffer_size = (uint64_t)padded_bytes_per_row * height;
+
+    wgpu::BufferDescriptor buf_desc = {};
+    buf_desc.size = buffer_size;
+    buf_desc.usage = wgpu::BufferUsage::MapRead | wgpu::BufferUsage::CopyDst;
+    wgpu::Buffer readback = graphics_context->device.CreateBuffer(&buf_desc);
+
+    wgpu::CommandEncoder encoder = graphics_context->device.CreateCommandEncoder();
+    wgpu::TexelCopyTextureInfo src = {};
+    src.texture = tex->texture;
+    wgpu::TexelCopyBufferInfo dst = {};
+    dst.buffer = readback;
+    dst.layout.bytesPerRow = padded_bytes_per_row;
+    dst.layout.rowsPerImage = height;
+    wgpu::Extent3D extent = {width, height, 1};
+    encoder.CopyTextureToBuffer(&src, &dst, &extent);
+    wgpu::CommandBuffer commands = encoder.Finish();
+    graphics_context->queue.Submit(1, &commands);
+
+    bool done = false;
+    readback.MapAsync(
+        wgpu::MapMode::Read, 0, buffer_size, wgpu::CallbackMode::AllowProcessEvents,
+        [&done](wgpu::MapAsyncStatus status, wgpu::StringView message) {
+            if (status != wgpu::MapAsyncStatus::Success)
+                fprintf(stderr, "particle_chain test: readback map failed: %.*s\n",
+                        (int)message.length, message.data);
+            done = true;
+        });
+    wait_for(&done);
+
+    const uint8_t *mapped = (const uint8_t *)readback.GetConstMappedRange(0, buffer_size);
+    assert(mapped);
+    for (uint32_t y = 0; y < height; y++) {
+        memcpy(out + y * width * 4, mapped + (uint64_t)y * padded_bytes_per_row,
+              unpadded_bytes_per_row);
+    }
+    readback.Unmap();
+}
+
+static void test_particle_chain_pixels_exist() {
+    const uint32_t SCREEN_W = 64, SCREEN_H = 64;
+    const uint32_t GRID_Z = 1;
+    // WG(10,10,10) == 1000 threads/group (cs_particles_transform.wgsl's
+    // override WG_X/Y/Z); dispatch(10,10,GRID_Z) covers exactly
+    // 10*10*GRID_Z*1000 particle indices with no gaps and no OOB buffer
+    // reads -- the same dispatch/index-bijection shape as main.cpp's
+    // VM_PARTICLES block (grid_z = NUM_PARTICLES/100/THREAD_GROUP_SIZE).
+    const uint32_t N_PARTICLES = 10 * 10 * GRID_Z * 1000;   // 100,000
+
+    // Grid-space particle positions, world_width=height=depth=64 (chosen
+    // below). With identity view+projection the shader's math (traced
+    // through cs_particles_transform.wgsl by hand):
+    //   in_posf = pos/world_size                          (grid -> [0,1])
+    //   p = (2*in_posf - 1) * (1, h/w, d/w); p.yz *= -1    ([0,1] -> [-1,1], h/w=d/w=1 here)
+    //   world_pos = view*vec4(p,1) = vec4(p,1)             (view = identity)
+    //   out_posf  = projection*world_pos = vec4(p,1)       (projection = identity)
+    //   out_posf /= out_posf.w                             (w == 1, no-op)
+    //   out_posf  = out_posf*0.5 + 0.5                     ([-1,1] -> [0,1])
+    //   screen_pos = out_posf.xy * (screen_width, screen_height)
+    // So grid pos (32,32,32) (dead center of a 64-wide world) -> p=(0,0,0)
+    // -> out_posf.xy=(0.5,0.5) -> screen_pos=(32,32): a clean, known pixel.
+    // Grid pos (64,32,32) -> in_posf.x=1.0 -> p.x=1.0 -> out_posf.x=1.0
+    // (passes the shader's `> 1.0` rejection, since 1.0 is not > 1.0) ->
+    // screen_pos.x = 64 == SCREEN_W: exactly the one-past-the-end case the
+    // shader's explicit OOB guard exists for (see header comment above).
+    //
+    // All other (filler) particles sit at z=1000 grid units, i.e.
+    // in_posf.z = 1000/64 = 15.625, far outside the default trim box
+    // [0,1] on z -- rejected at the shader's early trim-box return, so they
+    // can never touch either pixel/element this test inspects.
+    std::vector<float> px(N_PARTICLES, 32.0f), py(N_PARTICLES, 32.0f),
+                        pz(N_PARTICLES, 1000.0f), pt(N_PARTICLES, 1.0f);
+    px[0] = 32.0f; py[0] = 32.0f; pz[0] = 32.0f; pt[0] = 1.0f;   // -> pixel (32,32), agent-weight (10) splat
+    px[1] = 64.0f; py[1] = 32.0f; pz[1] = 32.0f; pt[1] = 1.0f;   // -> screen_pos.x == SCREEN_W, OOB guard must discard
+
+    RenderingConfigTest cfg = {};
+    set_identity16(cfg.projection);
+    set_identity16(cfg.view);
+    set_identity16(cfg.model);
+    cfg.trim_x_min = 0.0f; cfg.trim_x_max = 1.0f;
+    cfg.trim_y_min = 0.0f; cfg.trim_y_max = 1.0f;
+    cfg.trim_z_min = 0.0f; cfg.trim_z_max = 1.0f;
+    cfg.world_width = 64.0f; cfg.world_height = 64.0f; cfg.world_depth = 64.0f;
+    cfg.screen_width = (float)SCREEN_W; cfg.screen_height = (float)SCREEN_H;
+    cfg.sample_weight = 1.0f;    // blit: val_out = val * sample_weight for val < 10000
+    cfg.galaxy_weight = 0.25f;   // unused by t>=0 (agent) particles, set for hygiene
+
+    graphics::ConstantBuffer cfg_buf = graphics::get_constant_buffer(sizeof(RenderingConfigTest));
+    assert(graphics::is_ready(&cfg_buf));
+    graphics::update_constant_buffer(&cfg_buf, &cfg);
+
+    graphics::StructuredBuffer buf_x = graphics::get_structured_buffer(sizeof(float), N_PARTICLES);
+    graphics::StructuredBuffer buf_y = graphics::get_structured_buffer(sizeof(float), N_PARTICLES);
+    graphics::StructuredBuffer buf_z = graphics::get_structured_buffer(sizeof(float), N_PARTICLES);
+    graphics::StructuredBuffer buf_t = graphics::get_structured_buffer(sizeof(float), N_PARTICLES);
+    graphics::update_structured_buffer(&buf_x, px.data());
+    graphics::update_structured_buffer(&buf_y, py.data());
+    graphics::update_structured_buffer(&buf_z, pz.data());
+    graphics::update_structured_buffer(&buf_t, pt.data());
+
+    graphics::StructuredBuffer accum_buf = graphics::get_structured_buffer(sizeof(uint32_t), SCREEN_W * SCREEN_H);
+    assert(graphics::is_ready(&accum_buf));
+    graphics::clear_structured_buffer(&accum_buf);
+
+    graphics::Texture2D display_tex = graphics::get_texture2D(NULL, SCREEN_W, SCREEN_H, graphics::Format::RGBA32_FLOAT, 16);
+    assert(graphics::is_ready(&display_tex));
+
+    File transform_f = file_system::read_file(SHADER_DIR "/cs_particles_transform.wgsl");
+    assert(transform_f.data != NULL);
+    graphics::ComputeShader transform_cs =
+        graphics::get_compute_shader_from_code((char *)transform_f.data, transform_f.size);
+    file_system::release_file(transform_f);
+    assert(graphics::is_ready(&transform_cs));
+
+    File blit_f = file_system::read_file(SHADER_DIR "/cs_particles_blit.wgsl");
+    assert(blit_f.data != NULL);
+    graphics::ComputeShader blit_cs =
+        graphics::get_compute_shader_from_code((char *)blit_f.data, blit_f.size);
+    file_system::release_file(blit_f);
+    assert(graphics::is_ready(&blit_cs));
+
+    // Splat particles into the accumulation buffer -- same slot layout/order
+    // as main.cpp's VM_PARTICLES block (Task 3 brief step 3).
+    graphics::set_compute_shader(&transform_cs);
+    graphics::set_constant_buffer(&cfg_buf, 0);
+    graphics::set_structured_buffer(&accum_buf, 0);
+    graphics::set_structured_buffer(&buf_x, 2);
+    graphics::set_structured_buffer(&buf_y, 3);
+    graphics::set_structured_buffer(&buf_z, 4);
+    graphics::set_structured_buffer(&buf_t, 6);
+    graphics::run_compute(10, 10, GRID_Z);
+    graphics::unset_structured_buffer(0);
+    graphics::unset_structured_buffer(2);
+    graphics::unset_structured_buffer(3);
+    graphics::unset_structured_buffer(4);
+    graphics::unset_structured_buffer(6);
+
+    // Blit accumulated counts into display_tex.
+    graphics::set_compute_shader(&blit_cs);
+    graphics::set_constant_buffer(&cfg_buf, 0);
+    graphics::set_structured_buffer(&accum_buf, 0);
+    graphics::set_texture_compute(&display_tex, 1);
+    graphics::run_compute(SCREEN_W, SCREEN_H, 1);
+    graphics::unset_structured_buffer(0);
+    graphics::unset_texture_compute(1);
+
+    // (b) OOB guard: the accumulation buffer's LAST element (index
+    // SCREEN_W*SCREEN_H-1, the bottom-right screen texel) must be
+    // untouched. If cs_particles_transform.wgsl's explicit bounds guard
+    // were missing, WGSL's storage-buffer OOB-index safety would CLAMP the
+    // deliberately-OOB particle[1]'s atomicAdd to land here instead of
+    // discarding it.
+    std::vector<uint32_t> accum(SCREEN_W * SCREEN_H);
+    graphics::capture_structured_buffer(&accum_buf, accum.data(), SCREEN_W * SCREEN_H, sizeof(uint32_t));
+    uint32_t last_elem = accum[SCREEN_W * SCREEN_H - 1];
+    assert(last_elem == 0);
+
+    // (a) at least one texel has nonzero red, pinned to the known center
+    // pixel's exact expected value: one weight-10 splat * sample_weight(1.0).
+    std::vector<float> pixels(SCREEN_W * SCREEN_H * 4);
+    readback_texture2d_rgba32f(&display_tex, SCREEN_W, SCREEN_H, pixels.data());
+    bool any_nonzero = false;
+    for (uint32_t i = 0; i < SCREEN_W * SCREEN_H; i++) {
+        if (pixels[i * 4 + 0] > 0.0f) { any_nonzero = true; break; }
+    }
+    assert(any_nonzero);
+
+    uint32_t center_idx = 32u * SCREEN_W + 32u;
+    float center_val = pixels[center_idx * 4 + 0];
+    assert(fabsf(center_val - 10.0f) < 1e-3f);
+
+    printf("render_path_tests: particle chain pixels-exist test passed "
+           "(center pixel(32,32).x=%.3f, OOB-guard last accum elem=%u, any_nonzero_texel=%s)\n",
+           center_val, last_elem, any_nonzero ? "true" : "false");
+
+    graphics::release(&transform_cs);
+    graphics::release(&blit_cs);
+    graphics::release(&display_tex);
+    graphics::release(&accum_buf);
+    graphics::release(&buf_x);
+    graphics::release(&buf_y);
+    graphics::release(&buf_z);
+    graphics::release(&buf_t);
+    graphics::release(&cfg_buf);
+}
+
 int main() {
     bool ok = graphics::init();   // headless: no init_swap_chain
     assert(ok);
 
     test_shader_compile_validation();
     test_offscreen_draw_and_readback();
+    test_particle_chain_pixels_exist();
 
     graphics::release();
     printf("All render path tests passed\n");

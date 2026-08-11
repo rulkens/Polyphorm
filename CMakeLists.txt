@@ -135,6 +135,8 @@ add_executable(render_path_tests
   cpplib/logging.cpp
 )
 target_compile_features(render_path_tests PRIVATE cxx_std_17)
+target_compile_definitions(render_path_tests PRIVATE
+  SHADER_DIR="${CMAKE_SOURCE_DIR}/shaders")
 target_include_directories(render_path_tests PRIVATE ${CMAKE_SOURCE_DIR}/cpplib)
 target_link_libraries(render_path_tests PRIVATE webgpu_dawn webgpu_glfw glfw)
 target_compile_options(render_path_tests PRIVATE -UNDEBUG)

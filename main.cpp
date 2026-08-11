@@ -491,15 +491,36 @@ int main(int argc, char **argv)
     ComputeShader compute_shader = load_compute(SHADER_ROOT "/cs_agents_propagate.wgsl");
     ComputeShader decay_compute_shader = load_compute(SHADER_ROOT "/cs_field_decay.wgsl");
     ComputeShader cs_density_histo = load_compute(SHADER_ROOT "/cs_density_histo.wgsl");
+    ComputeShader draw_compute_shader_particle = load_compute(SHADER_ROOT "/cs_particles_transform.wgsl");
+    ComputeShader blit_compute_shader = load_compute(SHADER_ROOT "/cs_particles_blit.wgsl");
 
-    // M3: cs_particles_transform, cs_particles_blit, cs_agents_sort (upstream default-off)
-    // M4: cs_volpath + all vs_/ps_ shaders
-    ComputeShader draw_compute_shader_particle = {};
-    ComputeShader blit_compute_shader = {};
+    auto load_vs = [](const char *path) {
+        File f = file_system::read_file(path);
+        if (!f.data) { logging::print_error("shader file missing: %s", path); assert(false); }
+        VertexShader vs = graphics::get_vertex_shader_from_code((char *)f.data, f.size);
+        file_system::release_file(f);
+        assert(graphics::is_ready(&vs));
+        printf("%s compiled...\n", path);
+        return vs;
+    };
+    auto load_ps = [](const char *path) {
+        File f = file_system::read_file(path);
+        if (!f.data) { logging::print_error("shader file missing: %s", path); assert(false); }
+        PixelShader ps = graphics::get_pixel_shader_from_code((char *)f.data, f.size);
+        file_system::release_file(f);
+        assert(graphics::is_ready(&ps));
+        printf("%s compiled...\n", path);
+        return ps;
+    };
+    VertexShader vertex_shader_2d = load_vs(SHADER_ROOT "/vs_2d.wgsl");
+    PixelShader pixel_shader_2d = load_ps(SHADER_ROOT "/ps_particles_color.wgsl");
+
+    // M3: cs_agents_sort (upstream default-off)
+    // M4: cs_volpath + remaining vs_/ps_ shaders
     ComputeShader sort_shader = {};
     ComputeShader cs_volpath = {};
-    VertexShader vertex_shader = {}, vertex_shader_2d = {};
-    PixelShader pixel_shader = {}, pixel_shader_2d = {}, ps_volume_highlight = {},
+    VertexShader vertex_shader = {};
+    PixelShader pixel_shader = {}, ps_volume_highlight = {},
                 ps_volume_halocolor = {}, ps_volume_overdensity = {}, ps_volume_velocity = {}, ps_volpath = {};
 
     // Textures for the simulation
@@ -520,7 +541,6 @@ int main(int argc, char **argv)
     Texture3D trace_tex  = graphics::get_texture3D(NULL, GRID_RESOLUTION_X, GRID_RESOLUTION_Y, GRID_RESOLUTION_Z, graphics::Format::R32_FLOAT, 4);
     #endif
     Texture2D display_tex = graphics::get_texture2D(NULL, window_width, window_height, graphics::Format::RGBA32_FLOAT, 16);      // M3: framebuffer-vs-logical decision
-    Texture2D display_tex_uint = graphics::get_texture2D(NULL, window_width, window_height, graphics::Format::R32_UINT, 4);
     Texture2D palette_trace_tex = graphics::load_texture2D(COLOR_PALETTE_TRACE);
     Texture2D palette_data_tex = graphics::load_texture2D(COLOR_PALETTE_DATA);
 
@@ -629,6 +649,11 @@ int main(int argc, char **argv)
     graphics::update_structured_buffer(&density_histogram_buffer, density_histogram);
     StructuredBuffer halos_densities_buffer = graphics::get_structured_buffer(sizeof(float), data_count);
     graphics::update_structured_buffer(&halos_densities_buffer, halos_densities);
+
+    // Particle splat accumulation (replaces upstream's R32_UINT UAV texture:
+    // WGSL has no atomic storage textures — atomic<u32> buffer, row-major
+    // y*width+x. See docs/superpowers/research/m3/wgsl-drafts/translation-notes.md §0.1.
+    StructuredBuffer display_accum_buffer = graphics::get_structured_buffer(sizeof(uint32_t), window_width * window_height);
 
     // Set up 3D texture quad mesh.
     float super_quad_vertices_template[] = {
@@ -1138,10 +1163,35 @@ int main(int argc, char **argv)
             graphics::clear_render_target(&render_target_window, background_color, background_color, background_color, 1.0);
             
             if(vis_mode == VisualizationMode::VM_PARTICLES) {
-                // M3: particle draw path (cs_particles_transform + cs_particles_blit not yet ported).
-                // The quad draw below is a draw_mesh stub no-op until then.
+                graphics::clear_structured_buffer(&display_accum_buffer);
                 graphics::update_constant_buffer(&rendering_settings_buffer, &rendering_config);
 
+                // Splat particles into the accumulation buffer.
+                graphics::set_compute_shader(&draw_compute_shader_particle);
+                graphics::set_constant_buffer(&rendering_settings_buffer, 0);  // per-dispatch, fork convention (carryover I3)
+                graphics::set_structured_buffer(&display_accum_buffer, 0);
+                graphics::set_structured_buffer(&particles_buffer_x, 2);
+                graphics::set_structured_buffer(&particles_buffer_y, 3);
+                graphics::set_structured_buffer(&particles_buffer_z, 4);
+                graphics::set_structured_buffer(&particles_buffer_theta, 6);
+                int32_t grid_z = (NUM_PARTICLES / 100) / THREAD_GROUP_SIZE;
+                graphics::run_compute(10, 10, grid_z);
+                graphics::unset_structured_buffer(0);
+                graphics::unset_structured_buffer(2);
+                graphics::unset_structured_buffer(3);
+                graphics::unset_structured_buffer(4);
+                graphics::unset_structured_buffer(6);
+
+                // Blit accumulated counts into display_tex.
+                graphics::set_compute_shader(&blit_compute_shader);
+                graphics::set_constant_buffer(&rendering_settings_buffer, 0);
+                graphics::set_structured_buffer(&display_accum_buffer, 0);
+                graphics::set_texture_compute(&display_tex, 1);
+                graphics::run_compute(window_width, window_height, 1);
+                graphics::unset_structured_buffer(0);
+                graphics::unset_texture_compute(1);
+
+                // Draw display_tex to the window.
                 graphics::set_vertex_shader(&vertex_shader_2d);
                 graphics::set_pixel_shader(&pixel_shader_2d);
                 graphics::set_texture(&display_tex, 0);
@@ -1630,7 +1680,6 @@ int main(int argc, char **argv)
     graphics::release(&trail_tex_B);
     graphics::release(&trace_tex);
     graphics::release(&display_tex);
-    graphics::release(&display_tex_uint);
     graphics::release(&palette_trace_tex);
     graphics::release(&palette_data_tex);
     graphics::release(&tex_sampler_trace);
@@ -1646,6 +1695,7 @@ int main(int argc, char **argv)
     graphics::release(&particles_buffer_weights);
     graphics::release(&density_histogram_buffer);
     graphics::release(&halos_densities_buffer);
+    graphics::release(&display_accum_buffer);
     graphics::release(&rendering_settings_buffer);
     graphics::release();
 
