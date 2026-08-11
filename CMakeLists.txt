@@ -106,3 +106,20 @@ target_include_directories(graphics_tests PRIVATE ${CMAKE_SOURCE_DIR}/cpplib)
 target_link_libraries(graphics_tests PRIVATE webgpu_dawn webgpu_glfw glfw)
 target_compile_options(graphics_tests PRIVATE -UNDEBUG)
 add_test(NAME graphics_tests COMMAND graphics_tests)
+
+add_executable(shader_compile_tests
+  tests/shader_compile_tests.cpp
+  cpplib/graphics.cpp
+  cpplib/file_system.cpp
+  cpplib/gpu/gpu_context.cpp
+  cpplib/platform.cpp
+  cpplib/input.cpp
+  cpplib/logging.cpp
+)
+target_compile_features(shader_compile_tests PRIVATE cxx_std_17)
+target_compile_definitions(shader_compile_tests PRIVATE
+  SHADER_DIR="${CMAKE_SOURCE_DIR}/shaders")
+target_include_directories(shader_compile_tests PRIVATE ${CMAKE_SOURCE_DIR}/cpplib)
+target_link_libraries(shader_compile_tests PRIVATE webgpu_dawn webgpu_glfw glfw)
+target_compile_options(shader_compile_tests PRIVATE -UNDEBUG)
+add_test(NAME shader_compile_tests COMMAND shader_compile_tests)
