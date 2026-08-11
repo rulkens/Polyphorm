@@ -983,6 +983,12 @@ int main(int argc, char **argv)
                 ++simulation_config.n_iteration;
                 graphics::update_constant_buffer(&config_buffer, &simulation_config);
             }
+            graphics::unset_structured_buffer(2);
+            graphics::unset_structured_buffer(3);
+            graphics::unset_structured_buffer(4);
+            graphics::unset_structured_buffer(5);
+            graphics::unset_structured_buffer(6);
+            graphics::unset_structured_buffer(7);
         }
 
         // Decay/diffusion
@@ -1212,6 +1218,7 @@ int main(int argc, char **argv)
                 graphics::update_constant_buffer(&rendering_settings_buffer, &rendering_config);
                 if (run_pt && rendering_config.pt_iteration < 1e5 && graphics::is_ready(&cs_volpath)) {
                     graphics::set_compute_shader(&cs_volpath);
+                    graphics::set_constant_buffer(&rendering_settings_buffer, 0);
                     graphics::set_texture_compute(&display_tex, 0);
                     graphics::set_texture_sampled_compute(&trace_tex, 1);
                     graphics::set_texture_sampler_compute(&tex_sampler_trace, 1);
@@ -1592,6 +1599,7 @@ int main(int argc, char **argv)
     }
 
     if (headless) {
+        if (e_first < 0.0f) { printf("[headless] too few iterations to capture baseline (need > 10)\n"); return 1; }
         printf("[headless] E first=%f last=%f -> %s\n", e_first, e_last,
                (e_last > e_first * 1.05f) ? "ENERGY RISING" : "ENERGY NOT RISING");
         if (!(e_last > e_first * 1.05f)) { return 1; }
