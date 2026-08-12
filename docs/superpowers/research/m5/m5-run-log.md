@@ -41,3 +41,20 @@ Each task appends its section; nothing here is ever rewritten, only appended.
   not a failure signal).
 - Verdict: native-scale run + export CONFIRMED feasible (completes the Task
   zero probe). GRID_RESOLUTION = 1200 (native) stands; no fallback needed.
+
+## Task 9: validation run 1 launched (protocol §7)
+
+- Command: `--headless 1000 --export --dataset data/SDSS/sdssGalaxy_rsdCorr_dbscan_e2p0ms3_dz0p001_m10p0_t=0.0`
+- Log: run1-headless.log (same dir); launched 2026-08-13 01:29 local, git rev 41509ba
+- config.polyp: Agents 10000000, Grid resolution 1200, Grid padding 0.1
+- Compile-time constants: SDSS VAC (sense 4.6, persist 0.8, sharp 2.5,
+  move 0.1, spreads 20/10, deposit 0)
+- Known unrecorded-by-VAC parameters (design §7.2, interpretation caveats):
+  iteration count at export (protocol choice: 1000 + plateau criterion),
+  RNG seeding (upstream unseeded), GRID_PADDING (back-solved), HISTOGRAM_BASE
+  (stats-only).
+- Early sanity at ~2.5 min: process alive past the fatal-startup window
+  (allocation/grid failures die in seconds — Task 7 probe verified the same
+  binary+config produces grid 712x1200x728 and a clean export). Note: stdout
+  is block-buffered to the log file, so iteration lines land in flushes; the
+  E series is verified post-run (Task 10), not live.
