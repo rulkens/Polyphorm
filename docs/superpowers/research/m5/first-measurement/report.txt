@@ -1,0 +1,13 @@
+M5 d8 comparison — ours (native (712, 1200, 728), block-averaged x[8, 8, 8]) vs mcpm_sdss_d8.npy
+primary eps = 0.001   joint support = 366005/1214850 voxels
+
+metric                                 masked   unmasked
+pearson 3D voxelwise                  +0.9640    +0.9570
+pearson x max-projection              +0.9869    +0.9873
+pearson y max-projection              +0.9833    +0.9849
+pearson z max-projection              +0.9828    +0.9903
+
+eps 0.0001: 3D +0.9631 masked / +0.9406 unmasked (sensitivity)
+eps 0.01: 3D +0.9677 masked / +0.9733 unmasked (sensitivity)
+
+NOTE: no pass/fail verdict is printed — measure-first policy (M5 design §1); the human sets the acceptance bar.

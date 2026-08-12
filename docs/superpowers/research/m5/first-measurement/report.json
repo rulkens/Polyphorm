@@ -1,0 +1,58 @@
+{
+  "export_dir": "bin/export",
+  "reference": "/Users/rulkens/Development/js/skymap/data/raw/mcpm/mcpm_sdss_d8.npy",
+  "native_dims_xyz": [
+    712,
+    1200,
+    728
+  ],
+  "downsample_factors": [
+    8,
+    8,
+    8
+  ],
+  "pinned_flips": [
+    false,
+    false,
+    false
+  ],
+  "eps_primary": 0.001,
+  "metrics_by_eps": {
+    "0.0001": {
+      "pearson3d_masked": 0.9631031398354161,
+      "pearson3d_unmasked": 0.9405534586954526,
+      "joint_support_voxels": 366005,
+      "total_voxels": 1214850,
+      "pearson_proj_x_masked": 0.9865399160853707,
+      "pearson_proj_x_unmasked": 0.9794661515112632,
+      "pearson_proj_y_masked": 0.9829895619307747,
+      "pearson_proj_y_unmasked": 0.9766698464174108,
+      "pearson_proj_z_masked": 0.9824846444401427,
+      "pearson_proj_z_unmasked": 0.9851046385173932
+    },
+    "0.001": {
+      "pearson3d_masked": 0.9640294045100742,
+      "pearson3d_unmasked": 0.9570433938010934,
+      "joint_support_voxels": 366005,
+      "total_voxels": 1214850,
+      "pearson_proj_x_masked": 0.9868926423348231,
+      "pearson_proj_x_unmasked": 0.9873205510998689,
+      "pearson_proj_y_masked": 0.9833304705971456,
+      "pearson_proj_y_unmasked": 0.9849196200261675,
+      "pearson_proj_z_masked": 0.982845226407528,
+      "pearson_proj_z_unmasked": 0.9902758982970242
+    },
+    "0.01": {
+      "pearson3d_masked": 0.9677481757124607,
+      "pearson3d_unmasked": 0.9732640741273015,
+      "joint_support_voxels": 366005,
+      "total_voxels": 1214850,
+      "pearson_proj_x_masked": 0.9883144777270724,
+      "pearson_proj_x_unmasked": 0.99381989973389,
+      "pearson_proj_y_masked": 0.9848878811793713,
+      "pearson_proj_y_unmasked": 0.9919688511898463,
+      "pearson_proj_z_masked": 0.9843556298886577,
+      "pearson_proj_z_unmasked": 0.9946926792793965
+    }
+  }
+}

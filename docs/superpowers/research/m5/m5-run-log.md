@@ -79,3 +79,45 @@ Each task appends its section; nothing here is ever rewritten, only appended.
   ```
 - Finding: identity wins by 0.0551 mean-Pearson over the best flip;
   PINNED_FLIPS stays (False, False, False).
+
+## Task 11: first measurement (M5 deliverable — design §1)
+
+Resolution of record: native 712x1200x728 (design §6.2). Iterations: 1000,
+plateau dE = 0.1842%. Provenance: git rev 41509ba, SDSS VAC constants,
+config.polyp resolution 1200 / padding 0.1, catalog = packed
+sample_3D_linW.csv (324,901 pts).
+
+### d8 log-trace Pearson (eps 1e-3)
+
+| metric | masked (joint support) | unmasked |
+|---|---|---|
+| 3D voxelwise | +0.9640 | +0.9570 |
+| x max-projection | +0.9869 | +0.9873 |
+| y max-projection | +0.9833 | +0.9849 |
+| z max-projection | +0.9828 | +0.9903 |
+
+eps sensitivity: 1e-4 -> +0.9631 masked / +0.9406 unmasked; 1e-2 -> +0.9677
+masked / +0.9733 unmasked.
+Sanity PNG: first-measurement/projections.png.
+
+### Interpretation caveats (design §12 — carried honestly)
+
+1. PolyPhy precedent: ~0.085 3D / ~0.37-0.41 axis Pearson (linear min-max,
+   unmasked) vs this same reference with the correct input after 11
+   calibration runs — context, not a target.
+2. Racy-deposit nondeterminism bounds attainable correlation; our runs are
+   statistically, never bitwise, reproducible. (Optional post-gate follow-up
+   the human may request: a second run to measure self-correlation as a
+   ceiling estimate.)
+3. The VAC's iteration count at export is unrecorded — our 1000-iteration
+   plateau is a protocol choice.
+4. Catalog surrogate gap: 324,901 vs 324,849 pts; 6% of positions differ by
+   median ~0.6 Mpc (below the 0.78 Mpc voxel).
+
+### Human gate
+
+Presented to the human partner on 2026-08-13: the table above +
+projections.png. Per the measure-first decision, the human sets the
+acceptance bar now; misses against that bar trigger the spec's
+quirk-by-quirk A/B hunts (post-M5). Human's decision: <recorded verbatim
+after the gate>
