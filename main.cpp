@@ -1341,18 +1341,21 @@ int main(int argc, char **argv)
                         rendering_config.model = math::get_rotation(rotation_angle, Vector3(0, 1, 0)) * math::get_scale(1.0, WORLD_SIZE_Y / WORLD_SIZE_X, WORLD_SIZE_Z / WORLD_SIZE_X);
                         rendering_config.texcoord_map = (eye_pos.z > 0.0)? 1 : -1;
                         graphics::update_constant_buffer(&rendering_settings_buffer, &rendering_config);
+                        graphics::set_constant_buffer(&rendering_settings_buffer, 0);
                         graphics::draw_mesh(&super_quad_mesh);
                     } else if (math::abs(eye_pos.y) >= math::abs(eye_pos.x) && math::abs(eye_pos.y) >= math::abs(eye_pos.z)) {
                         rotation_angle = (eye_pos.y > 0.0)? -math::PIHALF : math::PIHALF;
                         rendering_config.model = math::get_rotation(rotation_angle, Vector3(1, 0, 0)) * math::get_scale(1.0, WORLD_SIZE_Z / WORLD_SIZE_X, WORLD_SIZE_Y / WORLD_SIZE_X);
                         rendering_config.texcoord_map = (eye_pos.y > 0.0)? 2 : -2;
                         graphics::update_constant_buffer(&rendering_settings_buffer, &rendering_config);
+                        graphics::set_constant_buffer(&rendering_settings_buffer, 0);
                         graphics::draw_mesh(&super_quad_mesh);
                     } else if (math::abs(eye_pos.x) > math::abs(eye_pos.y) && math::abs(eye_pos.x) > math::abs(eye_pos.z)) {
                         rotation_angle = (eye_pos.x > 0.0)? math::PIHALF : -math::PIHALF;
                         rendering_config.model = math::get_rotation(rotation_angle, Vector3(0, 1, 0)) * math::get_scale(WORLD_SIZE_Z / WORLD_SIZE_X, WORLD_SIZE_Y / WORLD_SIZE_X, 1.0);
                         rendering_config.texcoord_map = (eye_pos.x > 0.0)? 3 : -3;
                         graphics::update_constant_buffer(&rendering_settings_buffer, &rendering_config);
+                        graphics::set_constant_buffer(&rendering_settings_buffer, 0);
                         graphics::draw_mesh(&super_quad_mesh);
                     }
                 }
@@ -1402,6 +1405,8 @@ int main(int argc, char **argv)
                     graphics::set_pixel_shader(&ps_volpath);
                     graphics::set_texture(&display_tex, 0);
                     graphics::set_texture_sampler(&tex_sampler_display, 0);
+                    // ps_volpath declares a cbuffer even though vs_2d doesn't — needs_group0 ORs both stages (design §5, 4th site)
+                    graphics::set_constant_buffer(&rendering_settings_buffer, 0);
                     graphics::draw_mesh(&quad_mesh);
                     graphics::unset_texture(0);
                 }
