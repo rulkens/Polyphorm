@@ -149,9 +149,10 @@ void clear_render_target(RenderTarget *buffer, float r, float g, float b, float 
 // Opens a LoadOp::Load render pass on the window surface — draws on top of
 // whatever the scene pass(es) already wrote this frame. Reuses the existing
 // static ensure_encoder()/window_view() machinery; does not introduce a
-// second render-pass idiom. Caller (ui.cpp) must invoke this after every
-// scene draw_mesh call and before graphics::swap_frames() for the same
-// frame (see ui::end()).
+// second render-pass idiom. Contract: begin_ui_pass/end_ui_pass are invoked
+// by the frame-end hook (registered by ui::init, see set_frame_end_hook),
+// which swap_frames() runs after all scene passes are recorded and before
+// submit/Present. ui::end() is inert and kept only for upstream compatibility.
 wgpu::RenderPassEncoder begin_ui_pass();
 void end_ui_pass(wgpu::RenderPassEncoder pass);
 

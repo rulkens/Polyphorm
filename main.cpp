@@ -1391,6 +1391,8 @@ int main(int argc, char **argv)
                     graphics::unset_texture_sampled_compute(1);
                     graphics::unset_texture_sampled_compute(2);
                     graphics::unset_texture_sampled_compute(3);
+                    // upstream omission: slot 4 (palette+sampler) was never unset — harmless in D3D11, fatal under run_compute's strict-match contract; same adjudication class as the :1280 typo
+                    graphics::unset_texture_sampled_compute(4);
                     rendering_config.pt_iteration++;
                 }
 

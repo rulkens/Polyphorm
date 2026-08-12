@@ -34,7 +34,7 @@ static BoundSlot g_compute_slots[MAX_SLOTS];
 // written to that slot, and vice versa. Compute samplers bind at
 // @group(1) @binding(MAX_SLOTS + slot) = 16 + N: resources keep binding==slot
 // so all pre-M4 shaders are unchanged; cs_volpath's WGSL (M4b) declares
-// @binding(17/19/20) for its s1/s3/s4 samplers.
+// @binding(17/18/19/20) for its s1/s2/s3/s4 samplers.
 static wgpu::Sampler g_compute_samplers[MAX_SLOTS];
 static wgpu::Buffer g_uniform_buffer;            // group 0 binding 0
 static uint64_t g_uniform_size = 0;
@@ -220,9 +220,10 @@ void clear_render_target(RenderTarget *buffer, float r, float g, float b, float 
 
 // M4a design §2.2: the ImGui render-pass entry point. LoadOp::Load means
 // this draws on top of whatever the scene pass(es) already wrote to the
-// window view this frame — correct only when called after every scene
-// draw_mesh call and before swap_frames() (enforced by ui::end()'s call
-// site, main.cpp).
+// window view this frame. Contract: begin_ui_pass/end_ui_pass are invoked by
+// the frame-end hook (registered by ui::init, see graphics::set_frame_end_hook),
+// which swap_frames() runs after all scene passes are recorded and before
+// submit/Present. ui::end() is inert and kept only for upstream compatibility.
 wgpu::RenderPassEncoder begin_ui_pass() {
     ensure_encoder();
     wgpu::RenderPassColorAttachment att = {};
@@ -1069,7 +1070,7 @@ void run_compute(int gx, int gy, int gz) {
     }
     // Compute samplers bind at MAX_SLOTS + slot: resources keep binding==slot
     // so all pre-M4 shaders are unchanged; cs_volpath's WGSL (M4b) declares
-    // @binding(17/19/20) for its s1/s3/s4 samplers.
+    // @binding(17/18/19/20) for its s1/s2/s3/s4 samplers.
     for (uint32_t i = 0; i < MAX_SLOTS; i++) {
         if (!g_compute_samplers[i]) continue;
         wgpu::BindGroupEntry e = {};
