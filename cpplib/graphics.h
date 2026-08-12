@@ -162,7 +162,7 @@ Texture2D get_texture2D(void *data, uint32_t width, uint32_t height, Format form
 Texture3D get_texture3D(void *data, uint32_t width, uint32_t height, uint32_t depth,
                         Format format, uint32_t pixel_byte_count = 4);
 Texture2D load_texture2D(std::string filename);                 // M2a: stub (1x1 white)
-void save_texture3D(Texture3D *texture, std::string filename);  // M2a: stub (M5)
+void save_texture3D(Texture3D *texture, std::string filename);  // M5: implemented (F6 f16 .bin export)
 // M5: f32 -> IEEE 754 binary16 bit pattern (round-to-nearest-even; hardware
 // _Float16 cast on Apple clang). Public so the export-conversion CTest unit
 // can drive it with known vectors (top-level spec, "Testing").

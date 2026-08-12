@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <vector>
 
 // TEST_SHADER_DIR is injected by CMake as an absolute path to shaders/tests.
 static char *load_shader(const char *name, File *out) {
@@ -269,6 +270,43 @@ int main() {
         printf("graphics_tests: group0 hardening + unset_structured_buffer passed\n");
         graphics::release(&tex3d); graphics::release(&out_buffer);
         graphics::release(&cfg_buffer); graphics::release(&ids_shader); graphics::release(&tex_shader);
+    }
+
+    // --- Test 7 (M5): save_texture3D byte-exact round-trip. W*4 = 280 B is
+    // NOT 256-aligned, forcing the Dawn bytesPerRow de-padding path. Distinct
+    // integer texel values (all < 2048, exact in f16) pin the Z-major/
+    // X-fastest layout: any axis-order or de-pad bug scrambles the byte
+    // comparison. f32_to_f16 is the conversion oracle (its own vectors are
+    // Test 0), so this test isolates layout + file format, not rounding. ---
+    {
+        const uint32_t W = 70, H = 5, D = 3;
+        std::vector<float> src(W * H * D);
+        for (uint32_t z = 0; z < D; ++z)
+            for (uint32_t y = 0; y < H; ++y)
+                for (uint32_t x = 0; x < W; ++x)
+                    src[(z * H + y) * W + x] = (float)((z * H + y) * W + x);
+        graphics::Texture3D tex = graphics::get_texture3D(
+            src.data(), W, H, D, graphics::Format::R32_FLOAT);
+        assert(graphics::is_ready(&tex));
+
+        remove("m5_export_test.bin");
+        graphics::save_texture3D(&tex, "m5_export_test");   // appends ".bin"
+
+        FILE *f = fopen("m5_export_test.bin", "rb");
+        assert(f && "save_texture3D produced no .bin");
+        fseek(f, 0, SEEK_END);
+        long size = ftell(f);
+        assert(size == (long)(W * H * D * 2));              // headerless raw f16
+        fseek(f, 0, SEEK_SET);
+        std::vector<uint16_t> got(W * H * D);
+        size_t n = fread(got.data(), sizeof(uint16_t), got.size(), f);
+        assert(n == got.size());
+        fclose(f);
+        for (size_t i = 0; i < got.size(); ++i)
+            assert(got[i] == graphics::f32_to_f16(src[i])); // same Z-major order
+        remove("m5_export_test.bin");
+        printf("graphics_tests: save_texture3D round-trip passed\n");
+        graphics::release(&tex);
     }
 
     graphics::release();

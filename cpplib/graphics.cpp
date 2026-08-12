@@ -3,6 +3,7 @@
 #include <cstring>
 #include <cstdio>
 #include <vector>
+#include <fstream>
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_ONLY_TGA   // palettes are the only stbi consumers; keep the object small
@@ -496,7 +497,97 @@ uint16_t f32_to_f16(float v) {
 }
 
 void save_texture3D(Texture3D *texture, std::string filename) {
-    (void)texture; (void)filename; warn_once("save_texture3D");
+    // M5 (F6 export): GPU->CPU readback of the r32float 3D texture, CPU
+    // f32->f16 conversion, single write of upstream's byte format — headerless
+    // raw binary16, tightly packed, X fastest / Y next / Z slowest
+    // (index = z*W*H + y*W + x; DirectXTex ScratchImage layout). The upstream
+    // .dds sibling is dropped (port design decision). No endianness handling:
+    // both platforms little-endian, upstream never byte-swapped. `filename`
+    // arrives extension-less ("export/deposit", "export/trace"); ".bin" is
+    // appended here. Like upstream, no directory is created — bin/export/
+    // ships with the repo.
+    if (texture->format != Format::R32_FLOAT) {
+        // Only format the port's exportable textures use (main.cpp trail/trace
+        // creation). Loud skip, not silent garbage (design §3.1).
+        fprintf(stderr, "[graphics] save_texture3D: unsupported format, skipping %s\n",
+                filename.c_str());
+        return;
+    }
+    const uint32_t width = texture->width, height = texture->height,
+                   depth = texture->depth;
+    const uint32_t unpadded_bytes_per_row = width * 4;
+    // Dawn's 256 B bytesPerRow rule for texture->buffer copies (same as
+    // tests/render_path_tests.cpp readback helpers).
+    const uint32_t padded_bytes_per_row = (unpadded_bytes_per_row + 255u) & ~255u;
+    const uint64_t buffer_size = (uint64_t)padded_bytes_per_row * height * depth;
+
+    // Transient readback buffer, created and destroyed per call — F6 is a
+    // rare user action; no caching (design §3.2). ~2.5 GB at the native VAC
+    // grid; device maxBufferSize is requested at the adapter maximum in
+    // gpu_context.cpp precisely for this.
+    wgpu::BufferDescriptor desc = {};
+    desc.size = buffer_size;
+    desc.usage = wgpu::BufferUsage::MapRead | wgpu::BufferUsage::CopyDst;
+    wgpu::Buffer readback = g_ctx.device.CreateBuffer(&desc);
+
+    // Copy -> flush -> MapAsync -> blocking ProcessEvents pump: the exact
+    // capture_structured_buffer idiom. Synchronous same-frame stall is the
+    // established, deliberate convention (D3D11 Map(READ) parity).
+    ensure_encoder();
+    wgpu::TexelCopyTextureInfo src = {};
+    src.texture = texture->texture;
+    wgpu::TexelCopyBufferInfo dst = {};
+    dst.buffer = readback;
+    dst.layout.bytesPerRow = padded_bytes_per_row;
+    dst.layout.rowsPerImage = height;
+    wgpu::Extent3D extent = {width, height, depth};
+    g_encoder.CopyTextureToBuffer(&src, &dst, &extent);
+    flush_commands();
+
+    bool done = false;
+    readback.MapAsync(
+        wgpu::MapMode::Read, 0, buffer_size, wgpu::CallbackMode::AllowProcessEvents,
+        [&done](wgpu::MapAsyncStatus status, wgpu::StringView message) {
+            if (status != wgpu::MapAsyncStatus::Success)
+                fprintf(stderr, "[graphics] save_texture3D map failed: %.*s\n",
+                        (int)message.length, message.data);
+            done = true;
+        });
+    wait_for(&done);
+    const uint8_t *mapped = (const uint8_t *)readback.GetConstMappedRange(0, buffer_size);
+    if (!mapped) {
+        fprintf(stderr, "[graphics] save_texture3D: no mapped data, skipping %s\n",
+                filename.c_str());
+        readback.Unmap();
+        return;
+    }
+
+    // De-pad each row and convert f32->f16 while re-packing into the tight
+    // Z-major output (design §3.3).
+    std::vector<uint16_t> out((size_t)width * height * depth);
+    for (uint32_t z = 0; z < depth; ++z) {
+        for (uint32_t y = 0; y < height; ++y) {
+            const float *row = (const float *)(mapped
+                + (uint64_t)z * padded_bytes_per_row * height
+                + (uint64_t)y * padded_bytes_per_row);
+            uint16_t *dst_row = out.data() + ((size_t)z * height + y) * width;
+            for (uint32_t x = 0; x < width; ++x)
+                dst_row[x] = f32_to_f16(row[x]);
+        }
+    }
+    readback.Unmap();
+
+    std::ofstream bin_file(filename + ".bin", std::ofstream::binary);
+    if (!bin_file.good()) {
+        // Port-side diagnostics only (upstream wrote unchecked); does not
+        // alter the on-disk byte format.
+        fprintf(stderr, "[graphics] save_texture3D: cannot open %s.bin\n",
+                filename.c_str());
+        return;
+    }
+    bin_file.write((const char *)out.data(),
+                   (std::streamsize)(out.size() * sizeof(uint16_t)));
+    bin_file.close();
 }
 
 void save_texture2D_HDR(Texture2D *texture, std::string filename) {
