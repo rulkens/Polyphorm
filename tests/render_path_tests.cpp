@@ -909,7 +909,7 @@ static void test_compute_sampler_pairing() {
     graphics::set_texture_sampler_compute(&samp, 1);
     graphics::run_compute(1, 1, 1);
     graphics::unset_structured_buffer(0);
-    graphics::unset_texture_sampled_compute(1);
+    graphics::unset_texture_sampled_compute(1);  // also clears paired sampler at binding 16+slot
 
     float result[1] = {0.0f};
     graphics::capture_structured_buffer(&out_buf, result, 1, sizeof(float));

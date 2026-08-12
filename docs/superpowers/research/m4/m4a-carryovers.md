@@ -31,15 +31,18 @@ control ("ok ui works again"). Final-review fixes landed as a098681.
    PT accumulation recreates display_tex uninitialized while pt_iteration
    stays nonzero → garbage accumulation until manual reset. One line
    (`reset_pt = true;` in the resize branch) — land it WITH the PT port.
+   **CLOSED M4b (3b77762): reset_pt wired into resize block.**
 2. **PT dispatch truncation** (main.cpp ~1386-1389, pre-existing):
    `screen_width / PT_GROUP_SIZE_X` integer division under-covers the last
    partial tile band — newly relevant with resizable windows. Round up
    (and mind the shader's own bounds behavior when doing so).
+   **CLOSED M4b (3b77762): ceil-dispatch guard + OOB bounds check in kernel.**
 3. **HUD/histogram anchored to fixed SCREEN_X/SCREEN_Y** (main.cpp:1442,
    1485, 1537): overlay doesn't track live window size; vanishes if the
    window shrinks below initial height. Mechanical swap to live
    window_width/height, but it IS an upstream behavior change — give it
    its own adjudication line in the M4b plan.
+   **NOT DONE M4b — upstream behavior change deferred. Still open for M5.**
 4. **DPI-only resize miss** (main.cpp:877-879): resize detection keys on
    logical size; dragging between displays with different DPI changes only
    the framebuffer size → stale drawable scaled by Metal (blurry, no

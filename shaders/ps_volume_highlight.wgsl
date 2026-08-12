@@ -50,7 +50,7 @@ struct RenderingConfig {
     trim_y_max: f32,                       // +208  HLSL:21
     trim_z_min: f32,                       // +212  HLSL:22
     trim_z_max: f32,                       // +216  HLSL:23
-    trim_density: f32,                     // +220  HLSL:24  (unused here — no density term in this shader's trim early-out, unlike ps_volume_trace/ps_volume_overdensity)
+    trim_density: f32,                     // +220  HLSL:24  (read in trace attenuation: t = sample_weight * (trace - trim_density))
 
     world_width: f32,                      // +224  HLSL:25  (unused here)
     world_height: f32,                     // +228  HLSL:26  (unused here)

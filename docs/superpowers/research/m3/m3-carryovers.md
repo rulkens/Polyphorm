@@ -29,14 +29,16 @@ Esc/close clean. M3 fully closed.
    the three volume draw_mesh calls** (main.cpp ~1244/1250/1256 — only
    `update_` today). vs_3d declares @group(0); first volume draw hits
    draw_mesh's loud fatal. Add per-draw binds in the M4 port.
+   **CLOSED M4b (54b5d67): all four volume+PT draw sites wired — note fourth PT site at 1386.**
 4. **Blend alpha-channel formula is a guess** (SrcAlpha/OneMinusSrcAlpha on
    both channels). Unobservable in M3 (a=1.0 always). M4's volume slabs
    vary alpha per fragment: screenshot-compare against upstream before
-   trusting.
+   trusting. **STAYS OPEN — pending D3D11 reference capture.**
 5. **28-byte stride path has zero coverage** — the vertex-layout table
    entry exists but nothing draws super_quad_mesh. Add a headless 28B draw
    test (harness exists: get_render_target + readback in
    render_path_tests.cpp) before/with the vs_3d port.
+   **CLOSED M4b (220ec90): vs_3d port includes 28-byte-stride draw coverage test.**
 6. **Real UI makes stub-shader branches reachable.** ui_stub's add_toggle
    never mutates vis_mode; ImGui will. Volume/PT branches with `= {}`
    shaders abort on draw_mesh's assert (asserts are LIVE in the app
@@ -49,6 +51,7 @@ Esc/close clean. M3 fully closed.
 8. **Palette TGA loading** (load_texture2D is a 1×1 white stub) + relative
    `data/` path CWD discipline; the M2b histo-shader OOB note; blit
    numthreads(1,1,1) reshape only if profiling demands.
+   **CLOSED M4b (e62a434): real load_texture2D via stb_image v2.30, TGA palettes, DATA_ROOT paths.**
 
 ## Small fixes folded into M4 (triaged fix-in-M4)
 
