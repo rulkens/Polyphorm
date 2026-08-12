@@ -113,9 +113,14 @@ static void wait_for(bool *done) {
     while (!*done) graphics_context->gpu->instance.ProcessEvents();
 }
 
-// Reads back an RGBA32_FLOAT render target into `out` (width*height*4 floats).
-// CopyTextureToBuffer requires bytesPerRow padded to 256.
-static void readback_rgba32f(graphics::RenderTarget *rt, uint32_t width, uint32_t height,
+// Reads back an RGBA32_FLOAT texture into `out` (width*height*4 floats).
+// CopyTextureToBuffer requires bytesPerRow padded to 256. Takes a raw
+// wgpu::Texture (rather than graphics::RenderTarget*) so it works for both
+// RenderTarget-backed textures (call sites pass rt->texture) and plain
+// compute-storage-written graphics::Texture2D textures (Task 9, M4b: the
+// cs_volpath_blit readback below passes tex->texture) -- mechanical
+// generalization, task-9-brief.md step 1.
+static void readback_rgba32f(wgpu::Texture texture, uint32_t width, uint32_t height,
                              float *out) {
     const uint32_t unpadded_bytes_per_row = width * 4 * sizeof(float);
     const uint32_t padded_bytes_per_row = (unpadded_bytes_per_row + 255u) & ~255u;
@@ -128,7 +133,7 @@ static void readback_rgba32f(graphics::RenderTarget *rt, uint32_t width, uint32_
 
     wgpu::CommandEncoder encoder = graphics_context->device.CreateCommandEncoder();
     wgpu::TexelCopyTextureInfo src = {};
-    src.texture = rt->texture;
+    src.texture = texture;
     wgpu::TexelCopyBufferInfo dst = {};
     dst.buffer = readback;
     dst.layout.bytesPerRow = padded_bytes_per_row;
@@ -237,7 +242,7 @@ static void test_offscreen_draw_and_readback() {
     graphics::swap_frames();
 
     float pixels[RT_W * RT_H * 4];
-    readback_rgba32f(&rt, RT_W, RT_H, pixels);
+    readback_rgba32f(rt.texture, RT_W, RT_H, pixels);
 
     for (uint32_t i = 0; i < RT_W * RT_H; i++) {
         float r = pixels[i * 4 + 0];
@@ -316,7 +321,7 @@ static void test_load_texture2D_palette() {
     graphics::swap_frames();
 
     std::vector<float> pixels(RT_W * RT_H * 4);
-    readback_rgba32f(&rt, RT_W, RT_H, pixels.data());
+    readback_rgba32f(rt.texture, RT_W, RT_H, pixels.data());
 
     // RT pixel (x, 7) samples uv ((x+0.5)/130, 1 - 7.5/16) -> texel (x, 8) in
     // the top-down decoded texture -> TGA file scanline 15-8=7 (brief step 1).
@@ -818,7 +823,7 @@ static void test_super_quad_stride_draw() {
     graphics::swap_frames();
 
     float pixels[RT_W * RT_H * 4];
-    readback_rgba32f(&rt, RT_W, RT_H, pixels);
+    readback_rgba32f(rt.texture, RT_W, RT_H, pixels);
 
     // RT row 0 is NDC top (y_ndc = 1 - 2*(y+0.5)/H); v = (y_ndc+1)/2 =
     // 1 - (y+0.5)/H. u = (x_ndc+1)/2 = (x+0.5)/W directly. b is the constant
@@ -969,7 +974,7 @@ static void run_resize_cycle_pass(graphics::VertexShader *vs, graphics::PixelSha
     graphics::swap_frames();
 
     std::vector<float> pixels((size_t)w * h * 4);
-    readback_rgba32f(&rt, w, h, pixels.data());   // OOB CopyTextureToBuffer if rt were stale-sized
+    readback_rgba32f(rt.texture, w, h, pixels.data());   // OOB CopyTextureToBuffer if rt were stale-sized
 
     graphics_context->device.PopErrorScope(
         wgpu::CallbackMode::AllowProcessEvents,
@@ -1155,7 +1160,7 @@ static void test_volume_trace_readback() {
     graphics::swap_frames();
 
     float pixels[RT_W * RT_H * 4];
-    readback_rgba32f(&rt, RT_W, RT_H, pixels);
+    readback_rgba32f(rt.texture, RT_W, RT_H, pixels);
 
     // Center pixel (4,4): texcoord (0.5625, 0.4375, 0.25), inside the trim
     // box -> assert (2.0, 0.0, 0.0, 0.1580301).
@@ -1203,6 +1208,274 @@ static void test_volume_trace_readback() {
     graphics::release(&rt);
 }
 
+// ---- Test (Task 9, M4b, DESIGN §6 -- highest-value new test): cs_volpath
+// headless dispatch, four phases (task-9-brief.md) pinning end-to-end: the
+// buffer accumulator RMW conversion, ceil-dispatch full coverage at a
+// non-multiple-of-10 screen size, the OOB guard, and the blit's row-major
+// agreement with the accumulator.
+//
+// Screen 25x15 (neither dimension a multiple of 10): dispatch
+// ceil(25/10)=3 x ceil(15/10)=2 = 600 invocations, 375 in-bounds, 225
+// guarded out by cs_volpath.wgsl's QUIRK(oob_dispatch_guard). The buffer is
+// sized to exactly the 375 in-bounds pixels
+// (get_structured_buffer(4*sizeof(float), 375) == 375 x 16 B) -- if the OOB
+// guard were missing, WGSL's storage-buffer OOB-index CLAMP would land the
+// 225 tail invocations' writes on the buffer's last real element (index
+// 374) instead of discarding them, a >=0.8 deviation from Phase A's
+// expected value there (brief step 1).
+static void test_volpath_dispatch() {
+    const uint32_t SCREEN_W = 25, SCREEN_H = 15;
+    const uint32_t N = SCREEN_W * SCREEN_H;   // 375
+
+    File cs_f = file_system::read_file(SHADER_DIR "/cs_volpath.wgsl");
+    assert(cs_f.data != NULL);
+    graphics::ComputeShader cs_volpath =
+        graphics::get_compute_shader_from_code((char *)cs_f.data, cs_f.size);
+    file_system::release_file(cs_f);
+    assert(graphics::is_ready(&cs_volpath));
+    assert(cs_volpath.uses_group0);
+
+    File blit_f = file_system::read_file(SHADER_DIR "/cs_volpath_blit.wgsl");
+    assert(blit_f.data != NULL);
+    graphics::ComputeShader cs_volpath_blit =
+        graphics::get_compute_shader_from_code((char *)blit_f.data, blit_f.size);
+    file_system::release_file(blit_f);
+    assert(graphics::is_ready(&cs_volpath_blit));
+    assert(!cs_volpath_blit.uses_group0);
+
+    // Resources (task-9-brief.md step 1): tex_trace + tex_deposit 8x8x8
+    // R32_FLOAT (both start all-zero); palettes 2x2 RGBA8_UNORM (both start
+    // solid black).
+    std::vector<float> zero_volume(8 * 8 * 8, 0.0f);
+    graphics::Texture3D tex_trace =
+        graphics::get_texture3D(zero_volume.data(), 8, 8, 8, graphics::Format::R32_FLOAT, 4);
+    assert(graphics::is_ready(&tex_trace));
+    graphics::Texture3D tex_deposit =
+        graphics::get_texture3D(zero_volume.data(), 8, 8, 8, graphics::Format::R32_FLOAT, 4);
+    assert(graphics::is_ready(&tex_deposit));
+
+    uint8_t black_data[2 * 2 * 4] = {};   // zero-init == solid black (rgb only is sampled)
+    graphics::Texture2D tex_palette_trace =
+        graphics::get_texture2D(black_data, 2, 2, graphics::Format::RGBA8_UNORM, 4);
+    assert(graphics::is_ready(&tex_palette_trace));
+    graphics::Texture2D tex_palette_data =
+        graphics::get_texture2D(black_data, 2, 2, graphics::Format::RGBA8_UNORM, 4);
+    assert(graphics::is_ready(&tex_palette_data));
+
+    // Samplers: slots 1/2 (tex_trace/tex_deposit) CLAMP/ANISOTROPIC (matches
+    // main.cpp's tex_sampler_trace/tex_sampler_deposit); slots 3/4
+    // (palettes) default CLAMP/POINT.
+    graphics::TextureSampler samp_trace =
+        graphics::get_texture_sampler(graphics::CLAMP, graphics::Filter::ANISOTROPIC);
+    graphics::TextureSampler samp_deposit =
+        graphics::get_texture_sampler(graphics::CLAMP, graphics::Filter::ANISOTROPIC);
+    graphics::TextureSampler samp_palette_trace = graphics::get_texture_sampler();
+    graphics::TextureSampler samp_palette_data = graphics::get_texture_sampler();
+    assert(graphics::is_ready(&samp_trace));
+    assert(graphics::is_ready(&samp_deposit));
+    assert(graphics::is_ready(&samp_palette_trace));
+    assert(graphics::is_ready(&samp_palette_data));
+
+    graphics::StructuredBuffer accum = graphics::get_structured_buffer(4 * sizeof(float), N);
+    assert(graphics::is_ready(&accum));
+
+    // Config (task-9-brief.md step 1, cfg indices per NOTES §1).
+    RenderingConfigTest cfg = {};
+    set_identity16(cfg.projection);
+    set_identity16(cfg.view);
+    set_identity16(cfg.model);
+    cfg.screen_width = (float)SCREEN_W;
+    cfg.screen_height = (float)SCREEN_H;
+    cfg.world_width = 8.0f; cfg.world_height = 8.0f; cfg.world_depth = 8.0f;
+    cfg.trim_x_min = 0.0f; cfg.trim_x_max = 1.0f;
+    cfg.trim_y_min = 0.0f; cfg.trim_y_max = 1.0f;
+    cfg.trim_z_min = 0.0f; cfg.trim_z_max = 1.0f;
+    cfg.trim_density = 0.0f;
+    cfg.sample_weight = 1.0f;
+    cfg.galaxy_weight = 0.0f;
+    cfg.camera_x = 0.0f; cfg.camera_y = -4.0f; cfg.camera_z = 0.0f;
+    cfg.sigma_s = 0.0f;    // forces the deterministic emission-absorption ray-march branch
+    cfg.sigma_a = 0.5f;
+    cfg.sigma_e = 1.0f;
+    cfg.trace_max = 1.0f;
+    cfg.camera_offset_x = 0.0f; cfg.camera_offset_y = 0.0f;
+    cfg.exposure = 1.0f;
+    cfg.n_bounces = 2;
+    cfg.ambient_trace = 0.0f;
+    cfg.compressive_accumulation = 0;
+    cfg.guiding_strength = 0.0f;
+    cfg.scattering_anisotropy = 0.0f;
+    // cfg.pt_iteration set per-phase below.
+
+    graphics::ConstantBuffer cfg_buf = graphics::get_constant_buffer(sizeof(RenderingConfigTest));
+    assert(graphics::is_ready(&cfg_buf));
+
+    // Binds exactly like main.cpp:1370-1385 will (task-9-brief.md step 1):
+    // buffer at compute slot 0, sampled textures 1-4, samplers 1-4;
+    // set_constant_buffer before each dispatch. Unsets all afterwards
+    // (strict-match contract).
+    auto dispatch_volpath = [&]() {
+        graphics::update_constant_buffer(&cfg_buf, &cfg);
+        graphics::set_compute_shader(&cs_volpath);
+        graphics::set_constant_buffer(&cfg_buf, 0);
+        graphics::set_structured_buffer(&accum, 0);
+        graphics::set_texture_sampled_compute(&tex_trace, 1);
+        graphics::set_texture_sampler_compute(&samp_trace, 1);
+        graphics::set_texture_sampled_compute(&tex_deposit, 2);
+        graphics::set_texture_sampler_compute(&samp_deposit, 2);
+        graphics::set_texture_sampled_compute(&tex_palette_trace, 3);
+        graphics::set_texture_sampler_compute(&samp_palette_trace, 3);
+        graphics::set_texture_sampled_compute(&tex_palette_data, 4);
+        graphics::set_texture_sampler_compute(&samp_palette_data, 4);
+        graphics::run_compute(3, 2, 1);
+        graphics::unset_structured_buffer(0);
+        graphics::unset_texture_sampled_compute(1);
+        graphics::unset_texture_sampled_compute(2);
+        graphics::unset_texture_sampled_compute(3);
+        graphics::unset_texture_sampled_compute(4);
+    };
+
+    std::vector<float> out(N * 4);
+
+    // ---- Phase A: deterministic RMW + guard (pt_iteration = 5) ----
+    // trace/deposit ZERO, palettes BLACK -> every ray (hit or miss) yields
+    // path_L = (0,0,0). Pre-fill the buffer with 375 x (6,6,6,6); expected
+    // after one dispatch, for ALL 375 elements including the last:
+    // 6*(5/6) + (0,0,0,1)/6 = (5.0, 5.0, 5.0, 5.1666665).
+    std::vector<float> prefill(N * 4);
+    for (uint32_t i = 0; i < N; i++) {
+        prefill[i * 4 + 0] = 6.0f;
+        prefill[i * 4 + 1] = 6.0f;
+        prefill[i * 4 + 2] = 6.0f;
+        prefill[i * 4 + 3] = 6.0f;
+    }
+    graphics::update_structured_buffer(&accum, prefill.data());
+    cfg.pt_iteration = 5;
+    dispatch_volpath();
+    graphics::swap_frames();
+    graphics::capture_structured_buffer(&accum, out.data(), N, 4 * sizeof(float));
+
+    const float tolA = 1e-4f;
+    for (uint32_t i = 0; i < N; i++) {
+        assert(fabsf(out[i * 4 + 0] - 5.0f) < tolA);
+        assert(fabsf(out[i * 4 + 1] - 5.0f) < tolA);
+        assert(fabsf(out[i * 4 + 2] - 5.0f) < tolA);
+        assert(fabsf(out[i * 4 + 3] - 5.1666665f) < tolA);
+    }
+    printf("render_path_tests: cs_volpath Phase A (deterministic RMW + guard) passed "
+           "(elem[0]=(%.7f,%.7f,%.7f,%.7f), elem[374]=(%.7f,%.7f,%.7f,%.7f))\n",
+           out[0], out[1], out[2], out[3],
+           out[(N - 1) * 4 + 0], out[(N - 1) * 4 + 1], out[(N - 1) * 4 + 2], out[(N - 1) * 4 + 3]);
+
+    // ---- Phase B: zero-fill + full coverage (pt_iteration = 0) ----
+    // Same resources; expected ALL 375 elements exactly (0,0,0,1.0) --
+    // zero-fill at cs_volpath.wgsl's pt_iteration==0 branch, then
+    // 0*0/1 + vec4(path_L,1)/1. Alpha == 1.0 on every element pins that
+    // ceil-dispatch covered every pixel of the 25x15 grid (a truncating
+    // dispatch would leave rows 10-14 / cols 20-24 at their Phase A values).
+    cfg.pt_iteration = 0;
+    dispatch_volpath();
+    graphics::swap_frames();
+    graphics::capture_structured_buffer(&accum, out.data(), N, 4 * sizeof(float));
+
+    const float tolB = 1e-6f;
+    for (uint32_t i = 0; i < N; i++) {
+        assert(fabsf(out[i * 4 + 0] - 0.0f) < tolB);
+        assert(fabsf(out[i * 4 + 1] - 0.0f) < tolB);
+        assert(fabsf(out[i * 4 + 2] - 0.0f) < tolB);
+        assert(fabsf(out[i * 4 + 3] - 1.0f) < tolB);
+    }
+    printf("render_path_tests: cs_volpath Phase B (zero-fill + ceil-dispatch full "
+           "coverage) passed (all 375 elements == (0,0,0,1.0))\n");
+
+    // ---- Phase C: emission smoke (pt_iteration = 0) ----
+    // Re-upload trace = 2.0 everywhere; tex_palette_trace solid red
+    // (255,0,0,255); tex_palette_data stays black. Camera (0,-4,0) looks
+    // through the volume center. No texture-update API exists (only
+    // structured buffers support update_structured_buffer), so the
+    // trace/palette textures are released and recreated with new data.
+    graphics::release(&tex_trace);
+    std::vector<float> trace_two(8 * 8 * 8, 2.0f);
+    tex_trace = graphics::get_texture3D(trace_two.data(), 8, 8, 8, graphics::Format::R32_FLOAT, 4);
+    assert(graphics::is_ready(&tex_trace));
+
+    graphics::release(&tex_palette_trace);
+    uint8_t red_data[2 * 2 * 4];
+    for (int i = 0; i < 4; i++) {
+        red_data[i * 4 + 0] = 255;
+        red_data[i * 4 + 1] = 0;
+        red_data[i * 4 + 2] = 0;
+        red_data[i * 4 + 3] = 255;
+    }
+    tex_palette_trace = graphics::get_texture2D(red_data, 2, 2, graphics::Format::RGBA8_UNORM, 4);
+    assert(graphics::is_ready(&tex_palette_trace));
+
+    cfg.pt_iteration = 0;
+    dispatch_volpath();
+    graphics::swap_frames();
+    graphics::capture_structured_buffer(&accum, out.data(), N, 4 * sizeof(float));
+
+    // Center pixel index 7*25+12 = 187: red-only emission through
+    // get_emitted_trace_L (HALO term contributes black-palette zero).
+    {
+        const uint32_t i = 7u * SCREEN_W + 12u;
+        assert(i == 187);
+        float r = out[i * 4 + 0];
+        float g = out[i * 4 + 1];
+        float b = out[i * 4 + 2];
+        float a = out[i * 4 + 3];
+        assert(r > 0.001f);
+        assert(g < 1e-4f);
+        assert(b < 1e-4f);
+        assert(fabsf(a - 1.0f) < 1e-4f);
+        printf("render_path_tests: cs_volpath Phase C (emission smoke) passed "
+               "(center pixel[187]=(%.6f,%.6f,%.6f,%.6f))\n", r, g, b, a);
+    }
+
+    // Save Phase C's buffer contents for Phase D's blit-agreement check.
+    std::vector<float> phase_c_out = out;
+
+    // ---- Phase D: blit ----
+    // 25x15 RGBA32_FLOAT Texture2D via cs_volpath_blit.wgsl; assert all 375
+    // texels equal Phase C's buffer contents (pins the blit + row-major
+    // index agreement).
+    graphics::Texture2D display =
+        graphics::get_texture2D(nullptr, SCREEN_W, SCREEN_H, graphics::Format::RGBA32_FLOAT, 4);
+    assert(graphics::is_ready(&display));
+
+    graphics::set_compute_shader(&cs_volpath_blit);
+    graphics::set_structured_buffer(&accum, 0);
+    graphics::set_texture_compute(&display, 1);
+    graphics::run_compute(SCREEN_W, SCREEN_H, 1);
+    graphics::swap_frames();
+    graphics::unset_structured_buffer(0);
+    graphics::unset_texture_compute(1);
+
+    std::vector<float> blit_pixels(N * 4);
+    readback_rgba32f(display.texture, SCREEN_W, SCREEN_H, blit_pixels.data());
+
+    const float tolD = 1e-6f;
+    for (uint32_t i = 0; i < N * 4; i++) {
+        assert(fabsf(blit_pixels[i] - phase_c_out[i]) < tolD);
+    }
+    printf("render_path_tests: cs_volpath Phase D (blit agreement) passed "
+           "(all 375 texels match the accumulator buffer, tol 1e-6)\n");
+
+    graphics::release(&display);
+    graphics::release(&cfg_buf);
+    graphics::release(&accum);
+    graphics::release(&samp_trace);
+    graphics::release(&samp_deposit);
+    graphics::release(&samp_palette_trace);
+    graphics::release(&samp_palette_data);
+    graphics::release(&tex_trace);
+    graphics::release(&tex_deposit);
+    graphics::release(&tex_palette_trace);
+    graphics::release(&tex_palette_data);
+    graphics::release(&cs_volpath);
+    graphics::release(&cs_volpath_blit);
+}
+
 int main() {
     bool ok = graphics::init();   // headless: no init_swap_chain
     assert(ok);
@@ -1216,6 +1489,7 @@ int main() {
     test_compute_sampler_pairing();
     test_resize_cycle_offscreen();
     test_volume_trace_readback();
+    test_volpath_dispatch();
 
     graphics::release();
     printf("All render path tests passed\n");
