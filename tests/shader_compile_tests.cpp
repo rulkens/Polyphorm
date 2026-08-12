@@ -80,6 +80,11 @@ int main()
     // cbuffer at @group(0) @binding(0), same as vs_3d.wgsl.
     check_compiles_ps(SHADER_DIR "/ps_volume_trace.wgsl", 1);
 
+    // M4b Task 6: ps_volume_highlight.wgsl / ps_volume_overdensity.wgsl,
+    // same full RenderingConfig cbuffer shape as ps_volume_trace.wgsl.
+    check_compiles_ps(SHADER_DIR "/ps_volume_highlight.wgsl", 1);
+    check_compiles_ps(SHADER_DIR "/ps_volume_overdensity.wgsl", 1);
+
     graphics::release();
     printf("All shader compile tests passed\n");
     return 0;
