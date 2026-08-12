@@ -113,6 +113,19 @@ bool init_swap_chain(Window *window);   // surface config (framebuffer size)
 // holds an open encoder there since the previous frame's swap_frames()
 // already flushed it).
 void resize_surface(uint32_t fb_width, uint32_t fb_height);
+// M4a fix round 1: generic, ui::-agnostic extension point. If set,
+// swap_frames() invokes it once, before flush_commands()/Present — the only
+// point in a frame guaranteed to run after every scene draw_mesh call AND
+// every ui:: widget call, and before the frame's commands are submitted.
+// ui::init() registers ui::flush_frame() here so ImGui's Render() +
+// begin_ui_pass()/RenderDrawData/end_ui_pass() happens exactly once per
+// frame, regardless of how many times main.cpp calls the now-inert
+// ui::end() (see ui.cpp's ui::end()/flush_frame() comments for why: two
+// Render() cycles per app frame was consuming ImGui's MouseClicked edge in
+// the first cycle, before the panel's widgets were even issued in the
+// second). A plain function pointer, not a ui:: type, so graphics:: still
+// has no compile-time dependency on ui:: (design §2.2's layering rule).
+void set_frame_end_hook(void (*hook)());
 void swap_frames();                     // submit + present
 void release();                         // teardown, last call
 

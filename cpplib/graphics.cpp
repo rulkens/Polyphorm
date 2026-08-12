@@ -236,7 +236,15 @@ wgpu::RenderPassEncoder begin_ui_pass() {
 }
 void end_ui_pass(wgpu::RenderPassEncoder pass) { pass.End(); }
 
+static void (*g_frame_end_hook)() = nullptr;
+void set_frame_end_hook(void (*hook)()) { g_frame_end_hook = hook; }
+
 void swap_frames() {
+    // M4a fix round 1: run before flush_commands() — this is the one place
+    // guaranteed to be after every scene draw_mesh call and every ui::
+    // widget call this frame, and before this frame's commands are
+    // submitted/presented (graphics.h's set_frame_end_hook comment).
+    if (g_frame_end_hook) g_frame_end_hook();
     flush_commands();
     if (g_surface_tex_acquired) {
         g_gpu.surface.Present();
@@ -246,6 +254,7 @@ void swap_frames() {
 }
 
 void release() {
+    g_frame_end_hook = nullptr;
     flush_commands();
     g_uniform_buffer = nullptr;
     for (uint32_t i = 0; i < MAX_SLOTS; i++) { g_compute_slots[i] = {}; g_compute_samplers[i] = nullptr; }

@@ -17,21 +17,57 @@
 
 namespace ui {
 
-// Guards ImGui::NewFrame()/Render() pairing across the up-to-two-or-zero
-// ui::end() call sites in main.cpp (design §4.2). Set by ensure_frame_open()
-// (called lazily from the first per-frame ui:: touch), cleared once end()
-// has actually run Render()+submit.
+// Guards ImGui::NewFrame()/Render() pairing across the whole app frame. Set
+// by ensure_frame_open() (called lazily from the first per-frame ui::
+// touch), cleared once flush_frame() has actually run Render()+submit.
 static bool g_frame_open = false;
 static bool g_input_responsive = false;
 
 // Lazily opens the ImGui frame on the first ui:: touch of the frame
-// (is_registering_input/start_panel/draw_rect/draw_text all call this).
+// (is_registering_input/start_panel/draw_rect/draw_text/add_toggle/
+// add_slider all call this).
 static void ensure_frame_open() {
     if (g_frame_open) return;
     ImGui_ImplWGPU_NewFrame();
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
     g_frame_open = true;
+}
+
+// M4a fix round 1 (human gate failure: "cannot interact with the GUI").
+// Root cause: main.cpp calls ui::end() up to three times per app frame
+// (histogram block, panel block, defensive pre-swap_frames call). The
+// original adapter rendered+closed the ImGui frame on the FIRST end() call
+// (the histogram block's — background draw lists only, no widgets) before
+// the panel's sliders/toggles were even issued; ensure_frame_open() then
+// opened a SECOND NewFrame()/Render() cycle for the panel. Both passes are
+// LoadOp::Load, so the *visuals* still accumulated correctly (panel and
+// histogram render fine) — but ImGui derives the MouseClicked edge inside
+// NewFrame() from MouseDownDuration, and the first cycle's NewFrame()
+// consumed that edge; by the second cycle (the one with the actual
+// widgets), MouseDownDuration was no longer < 0, so MouseClicked was never
+// true there and SliderBehavior/ButtonBehavior could never begin a
+// drag/press. DESIGN §8 risk #1, materializing as an input bug rather than
+// the anticipated NewFrame-without-Render assert.
+//
+// Fix: ui::end() (below) no longer renders at all — it's now inert, kept
+// only because ui.h's signature can't change and main.cpp's three call
+// sites are unconditionally still compiled against it. The actual flush
+// (Render() + begin_ui_pass()/RenderDrawData/end_ui_pass()) happens exactly
+// once per app frame, in flush_frame() below, invoked by
+// graphics::swap_frames()'s frame-end hook (registered here in init()) —
+// the one point guaranteed to run after every scene draw_mesh call AND
+// every ui:: widget call this frame (main.cpp's histogram/panel blocks both
+// run before swap_frames()), and before this frame's commands are
+// submitted/presented. One NewFrame()/Render() pair per app frame,
+// independent of how many (0-3) times main.cpp calls ui::end().
+static void flush_frame() {
+    if (!g_frame_open) return;
+    ImGui::Render();
+    wgpu::RenderPassEncoder pass = graphics::begin_ui_pass();
+    ImGui_ImplWGPU_RenderDrawData(ImGui::GetDrawData(), pass.Get());
+    graphics::end_ui_pass(pass);
+    g_frame_open = false;
 }
 
 void init(float, float) {
@@ -49,6 +85,8 @@ void init(float, float) {
     info.RenderTargetFormat = (WGPUTextureFormat)graphics::get_window_surface_format();
     info.DepthStencilFormat = WGPUTextureFormat_Undefined;
     ImGui_ImplWGPU_Init(&info);
+
+    graphics::set_frame_end_hook(&flush_frame);
 }
 
 void draw_text(const char *text, Font *, float x, float y, Vector4 color, Vector2 origin) {
@@ -110,12 +148,10 @@ Vector4 get_panel_rect(Panel *panel) {
 }
 
 void end() {
-    if (!g_frame_open) return;   // nothing pending — idempotent per frame (design §2.3)
-    ImGui::Render();
-    wgpu::RenderPassEncoder pass = graphics::begin_ui_pass();
-    ImGui_ImplWGPU_RenderDrawData(ImGui::GetDrawData(), pass.Get());
-    graphics::end_ui_pass(pass);
-    g_frame_open = false;
+    // M4a fix round 1: intentionally inert — see flush_frame()'s comment
+    // above. Kept only so ui.h's signature (and main.cpp's three existing
+    // call sites) keep compiling unmodified; the real per-frame flush now
+    // happens exactly once, from graphics::swap_frames()'s frame-end hook.
 }
 
 bool add_toggle(Panel *, char *label, bool *state) {
@@ -129,6 +165,7 @@ bool add_slider(Panel *, char *label, float *pos, float min, float max) {
 }
 
 void release() {
+    graphics::set_frame_end_hook(nullptr);   // defensive: no dangling callback into torn-down ImGui state
     ImGui_ImplWGPU_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();

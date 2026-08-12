@@ -923,18 +923,20 @@ int main(int argc, char **argv)
             // finding): ui::is_registering_input() is itself a ui:: touch --
             // it unconditionally calls ensure_frame_open() (ui.cpp), exactly
             // like start_panel/draw_rect/draw_text. Calling it during a
-            // minimized frame would open an ImGui frame that the loop's
-            // final `if (!headless) ui::end();` catch-all (below) would then
-            // try to Render() and Present() against a window surface that
-            // was never re-Configure'd this frame (graphics::resize_surface
+            // minimized frame would open an ImGui frame that would then get
+            // Render()'d and Present()'d against a window surface that was
+            // never re-Configure'd this frame (graphics::resize_surface
             // skips Configure at 0x0 -- see its comment). Skipping the call
             // entirely while minimized is the root-cause fix: it keeps
             // ui.cpp's g_frame_open false for the whole frame, so that
-            // final ui::end() call's own early-return
-            // ("if (!g_frame_open) return;") is what actually protects
-            // begin_ui_pass()/window_view()/swap_frames()'s Present() --
-            // consistent with every OTHER window-touching block in this
-            // loop already being gated by !window_minimized.
+            // ui.cpp's flush_frame() -- invoked once per frame from
+            // graphics::swap_frames()'s frame-end hook (M4a fix round 1,
+            // `ui::end()` itself is now inert -- see ui.cpp) -- takes its own
+            // early-return ("if (!g_frame_open) return;") instead of calling
+            // begin_ui_pass()/window_view()/RenderDrawData, which is what
+            // actually protects swap_frames()'s Present() -- consistent with
+            // every OTHER window-touching block in this loop already being
+            // gated by !window_minimized.
             bool ui_wants_mouse = !window_minimized && ui::is_registering_input();
             if(!ui_wants_mouse) {
                 if (math::abs(input::mouse_scroll_delta()) > 0)
