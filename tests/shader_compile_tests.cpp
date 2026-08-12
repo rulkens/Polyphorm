@@ -100,6 +100,13 @@ int main()
     check_compiles(SHADER_DIR "/cs_volpath.wgsl", 1);
     check_compiles(SHADER_DIR "/cs_volpath_blit.wgsl", 0);
 
+    // M4b Task 10: ps_volpath.wgsl (DESIGN §2.7) — displays the PT
+    // accumulator (blitted to display_tex by cs_volpath_blit.wgsl above).
+    // Pairs with vs_2d.wgsl (uses_group0=0), but this pixel shader DOES
+    // declare the full RenderingConfig cbuffer at @group(0) @binding(0)
+    // (unlike its paired vs_2d.wgsl), so uses_group0=1 here.
+    check_compiles_ps(SHADER_DIR "/ps_volpath.wgsl", 1);
+
     graphics::release();
     printf("All shader compile tests passed\n");
     return 0;
