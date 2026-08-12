@@ -260,6 +260,92 @@ static void test_offscreen_draw_and_readback() {
     graphics::release(&rt);
 }
 
+// ---- Test (Task 2, M4b): load_texture2D palette readback ----
+// Loads a real 24 bpp BGR TGA palette (bin/data/palette_hot.tga) via
+// stb_image and verifies both the decoded texture shape and specific pixel
+// values against hand-derived-from-file-bytes expectations (task-2-brief.md
+// step 1). Full-RGBA passthrough PS (unlike SAMPLE_PS_WGSL's single-channel
+// broadcast above) so BGR->RGBA swizzle and vertical-flip bugs both show up.
+static const char *PASSTHROUGH_PS_WGSL = R"(
+@group(1) @binding(0) var tex : texture_2d<f32>;
+@group(1) @binding(1) var samp : sampler;
+
+@fragment
+fn main(@location(0) uv : vec2<f32>) -> @location(0) vec4<f32> {
+    return textureSample(tex, samp, uv);
+}
+)";
+
+static void test_load_texture2D_palette() {
+    graphics::Texture2D pal = graphics::load_texture2D(DATA_ROOT "/data/palette_hot.tga");
+    assert(graphics::is_ready(&pal));
+    assert(pal.width == 130);
+    assert(pal.height == 16);
+    assert(pal.format == graphics::Format::RGBA8_UNORM);
+
+    const uint32_t RT_W = 130, RT_H = 16;
+    graphics::RenderTarget rt =
+        graphics::get_render_target(RT_W, RT_H, graphics::Format::RGBA32_FLOAT);
+    assert(graphics::is_ready(&rt));
+
+    graphics::set_render_targets_viewport(&rt);
+    graphics::clear_render_target(&rt, 0.0f, 0.0f, 0.0f, 1.0f);
+
+    graphics::TextureSampler samp = graphics::get_texture_sampler();   // POINT/CLAMP default
+    assert(graphics::is_ready(&samp));
+
+    graphics::VertexShader vs =
+        graphics::get_vertex_shader_from_code((char *)QUAD_VS_WGSL, (uint32_t)strlen(QUAD_VS_WGSL));
+    assert(graphics::is_ready(&vs));
+    graphics::PixelShader ps =
+        graphics::get_pixel_shader_from_code((char *)PASSTHROUGH_PS_WGSL, (uint32_t)strlen(PASSTHROUGH_PS_WGSL));
+    assert(graphics::is_ready(&ps));
+
+    graphics::set_vertex_shader(&vs);
+    graphics::set_pixel_shader(&ps);
+
+    graphics::set_texture(&pal, 0);
+    graphics::set_texture_sampler(&samp, 0);
+
+    graphics::Mesh quad = graphics::get_mesh(quad_vertices, quad_vertices_count,
+                                             quad_vertices_stride, NULL, 0, 0);
+    assert(graphics::is_ready(&quad));
+
+    graphics::set_blend_state(graphics::BlendType::OPAQUE);
+    graphics::draw_mesh(&quad);
+    graphics::swap_frames();
+
+    std::vector<float> pixels(RT_W * RT_H * 4);
+    readback_rgba32f(&rt, RT_W, RT_H, pixels.data());
+
+    // RT pixel (x, 7) samples uv ((x+0.5)/130, 1 - 7.5/16) -> texel (x, 8) in
+    // the top-down decoded texture -> TGA file scanline 15-8=7 (brief step 1).
+    const float tol = 1.5e-3f;
+    auto check_pixel = [&](uint32_t x, uint32_t y, float r, float g, float b, float a) {
+        uint32_t i = y * RT_W + x;
+        float pr = pixels[i * 4 + 0];
+        float pg = pixels[i * 4 + 1];
+        float pb = pixels[i * 4 + 2];
+        float pa = pixels[i * 4 + 3];
+        assert(fabsf(pr - r) < tol);
+        assert(fabsf(pg - g) < tol);
+        assert(fabsf(pb - b) < tol);
+        assert(fabsf(pa - a) < tol);
+    };
+    check_pixel(0, 7, 0.0f, 0.0f, 0.0f, 1.0f);
+    check_pixel(64, 7, 250.f/255.f, 123.f/255.f, 0.0f, 1.0f);
+    check_pixel(129, 7, 254.f/255.f, 254.f/255.f, 250.f/255.f, 1.0f);
+    printf("render_path_tests: load_texture2D palette readback passed (palette_hot.tga scanline 7 pixels match)\n");
+
+    graphics::unset_texture(0);
+    graphics::release(&quad);
+    graphics::release(&vs);
+    graphics::release(&ps);
+    graphics::release(&samp);
+    graphics::release(&pal);
+    graphics::release(&rt);
+}
+
 // ---- Test 2b (Task 1 / DESIGN §6.1, I1a): unset_texture must clear BOTH
 // the view AND the sampler at that slot ----
 //
@@ -842,6 +928,7 @@ int main() {
 
     test_shader_compile_validation();
     test_offscreen_draw_and_readback();
+    test_load_texture2D_palette();
     test_unset_texture_clears_sampler();
     test_particle_chain_pixels_exist();
     test_compute_sampler_pairing();

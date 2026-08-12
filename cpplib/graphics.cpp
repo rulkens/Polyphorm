@@ -4,6 +4,10 @@
 #include <cstdio>
 #include <vector>
 
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_ONLY_TGA   // palettes are the only stbi consumers; keep the object small
+#include "stb_image.h"
+
 graphics::GraphicsContext *graphics_context = nullptr;
 
 namespace graphics {
@@ -462,12 +466,19 @@ TextureSampler get_texture_sampler(SampleMode mode, Filter filter) {
 }
 
 Texture2D load_texture2D(std::string filename) {
-    // Palette TGAs load for real in M4 via stb_image; until then a 1x1 white
-    // texture keeps bind groups valid.
-    warn_once("load_texture2D");
-    (void)filename;
-    float white[4] = {1.f, 1.f, 1.f, 1.f};
-    return get_texture2D(white, 1, 1, Format::RGBA32_FLOAT);
+    int w = 0, h = 0, n = 0;
+    unsigned char *pixels = stbi_load(filename.c_str(), &w, &h, &n, 4); // force RGBA
+    if (!pixels) {
+        char msg[512];
+        snprintf(msg, sizeof(msg), "load_texture2D: cannot load %s (%s)",
+                 filename.c_str(), stbi_failure_reason());
+        fatal(msg);   // palette missing == packaging error; fail loud like shader loads
+    }
+    // RGBA8_UNORM, not _SRGB: adjudicated 2026-08-12 — plain truecolor LUT data,
+    // verified by screenshot-compare at the M4b human gate (deviations = gate findings).
+    Texture2D t = get_texture2D(pixels, (uint32_t)w, (uint32_t)h, Format::RGBA8_UNORM);
+    stbi_image_free(pixels);
+    return t;
 }
 
 void save_texture3D(Texture3D *texture, std::string filename) {

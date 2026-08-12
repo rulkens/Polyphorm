@@ -92,7 +92,7 @@ add_executable(polyphorm
 )
 target_include_directories(polyphorm PRIVATE cpplib)
 target_link_libraries(polyphorm PRIVATE imgui webgpu_dawn webgpu_glfw glfw)
-target_compile_definitions(polyphorm PRIVATE SHADER_ROOT="${CMAKE_SOURCE_DIR}/shaders")
+target_compile_definitions(polyphorm PRIVATE SHADER_ROOT="${CMAKE_SOURCE_DIR}/shaders" DATA_ROOT="${CMAKE_SOURCE_DIR}/bin")
 # -UNDEBUG: see the note below on the test targets — Release mode compiles
 # out every load-bearing assert() (set_constant_buffer slot==0, run_compute
 # valid-shader, clear format asserts, get_mesh non-indexed, ...) unless we
@@ -174,7 +174,8 @@ add_executable(render_path_tests
 )
 target_compile_features(render_path_tests PRIVATE cxx_std_17)
 target_compile_definitions(render_path_tests PRIVATE
-  SHADER_DIR="${CMAKE_SOURCE_DIR}/shaders")
+  SHADER_DIR="${CMAKE_SOURCE_DIR}/shaders"
+  DATA_ROOT="${CMAKE_SOURCE_DIR}/bin")
 target_include_directories(render_path_tests PRIVATE ${CMAKE_SOURCE_DIR}/cpplib)
 target_link_libraries(render_path_tests PRIVATE webgpu_dawn webgpu_glfw glfw)
 target_compile_options(render_path_tests PRIVATE -UNDEBUG)

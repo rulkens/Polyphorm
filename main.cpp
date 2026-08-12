@@ -541,8 +541,9 @@ int main(int argc, char **argv)
     Texture3D trace_tex  = graphics::get_texture3D(NULL, GRID_RESOLUTION_X, GRID_RESOLUTION_Y, GRID_RESOLUTION_Z, graphics::Format::R32_FLOAT, 4);
     #endif
     Texture2D display_tex = graphics::get_texture2D(NULL, window_width, window_height, graphics::Format::RGBA32_FLOAT, 16);      // M3: framebuffer-vs-logical decision
-    Texture2D palette_trace_tex = graphics::load_texture2D(COLOR_PALETTE_TRACE);
-    Texture2D palette_data_tex = graphics::load_texture2D(COLOR_PALETTE_DATA);
+    // DATA_ROOT mirrors SHADER_ROOT's absolute-path fix — the M3 gate recipe runs from /tmp/polyviz with no data/ subdir (design §4)
+    Texture2D palette_trace_tex = graphics::load_texture2D(DATA_ROOT "/" COLOR_PALETTE_TRACE);
+    Texture2D palette_data_tex = graphics::load_texture2D(DATA_ROOT "/" COLOR_PALETTE_DATA);
 
     TextureSampler tex_sampler_trace = graphics::get_texture_sampler(graphics::CLAMP, graphics::Filter::ANISOTROPIC);
     TextureSampler tex_sampler_deposit = graphics::get_texture_sampler(graphics::CLAMP, graphics::Filter::ANISOTROPIC);
