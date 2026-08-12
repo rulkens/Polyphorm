@@ -519,8 +519,8 @@ int main(int argc, char **argv)
     // M4: cs_volpath + remaining vs_/ps_ shaders
     ComputeShader sort_shader = {};
     ComputeShader cs_volpath = {};
-    VertexShader vertex_shader = {};
-    PixelShader pixel_shader = {}, ps_volume_highlight = {},
+    VertexShader vertex_shader = load_vs(SHADER_ROOT "/vs_3d.wgsl");
+    PixelShader pixel_shader = load_ps(SHADER_ROOT "/ps_volume_trace.wgsl"), ps_volume_highlight = {},
                 ps_volume_halocolor = {}, ps_volume_overdensity = {}, ps_volume_velocity = {}, ps_volpath = {};
 
     // Textures for the simulation
