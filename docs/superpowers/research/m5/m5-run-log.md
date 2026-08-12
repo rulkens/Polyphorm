@@ -58,3 +58,24 @@ Each task appends its section; nothing here is ever rewritten, only appended.
   binary+config produces grid 712x1200x728 and a clean export). Note: stdout
   is block-buffered to the log file, so iteration lines land in flushes; the
   E series is verified post-run (Task 10), not live.
+
+## Task 10: convergence, metadata parity, orientation (run 1)
+
+- Convergence: E(800) = 87.953613, E(1000) = 87.791565, relative dE = 0.1842% (< 1%: CONVERGED)
+- Metadata diff vs reference export_metadata.txt: all fields PASS
+  (data-point count 324901 vs 324849 — known surrogate delta, design risk 4)
+- Orientation scan (design §8.6) — recorded table:
+  ```
+  orientation scan (8 flip combos, sorted by mean; identity must win):
+    flips (x, y, z)             proj-x    proj-y    proj-z     mean
+    (False, False, False)      +0.9873   +0.9849   +0.9903   +0.9875   <-- identity
+    (False, True, False)       +0.9329   +0.9849   +0.8794   +0.9324
+    (True, False, False)       +0.9873   +0.7807   +0.8502   +0.8727
+    (True, True, False)        +0.9329   +0.7807   +0.8764   +0.8633
+    (False, False, True)       +0.6542   +0.4897   +0.9903   +0.7114
+    (False, True, True)        +0.6561   +0.4897   +0.8794   +0.6751
+    (True, True, True)         +0.6561   +0.4656   +0.8764   +0.6661
+    (True, False, True)        +0.6542   +0.4656   +0.8502   +0.6567
+  ```
+- Finding: identity wins by 0.0551 mean-Pearson over the best flip;
+  PINNED_FLIPS stays (False, False, False).

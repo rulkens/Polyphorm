@@ -55,6 +55,7 @@ SENSITIVITY_EPS = (1e-4, 1e-2)
 # scan, that is a BUG in load_export's layout assumption — fix the transpose
 # there; never ship a compensating flip here. The recorded scan table lives
 # in docs/superpowers/research/m5/m5-run-log.md.
+# Scan run on run 1 (2026-08-13): identity won — table recorded in docs/superpowers/research/m5/m5-run-log.md.
 PINNED_FLIPS = (False, False, False)
 
 
