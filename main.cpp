@@ -60,13 +60,25 @@ using namespace graphics;
 // const float PERSISTENCE = 0.91;
 // const float SAMPLING_EXPONENT = 3.5;
 // SDSS large
+// const float SENSE_SPREAD = 20.0;
+// const float SENSE_DISTANCE = 3.51;
+// const float MOVE_ANGLE = 10.0;
+// const float MOVE_DISTANCE = 0.1;
+// const float AGENT_DEPOSIT = 0.0;
+// const float PERSISTENCE = 0.89;
+// const float SAMPLING_EXPONENT = 4.08;
+// SDSS VAC — published DR17 Cosmic Slime VAC parameters (its
+// export_metadata.txt: sense 4.6 mpc, persistence 0.8, sharpness 2.5;
+// move 0.1 / spreads 20,10 / deposit 0 already matched). M5 validation
+// protocol; a data edit in the file's own alternate-block idiom, not a
+// logic change (design §7.1).
 const float SENSE_SPREAD = 20.0;
-const float SENSE_DISTANCE = 3.51;
+const float SENSE_DISTANCE = 4.6;
 const float MOVE_ANGLE = 10.0;
 const float MOVE_DISTANCE = 0.1;
 const float AGENT_DEPOSIT = 0.0;
-const float PERSISTENCE = 0.89;
-const float SAMPLING_EXPONENT = 4.08;
+const float PERSISTENCE = 0.8;
+const float SAMPLING_EXPONENT = 2.5;
 #endif
 
 #ifdef REGIME_BOLSHOI_PLANCK
