@@ -352,9 +352,14 @@ int main(int argc, char **argv)
     // energy_smoke ctest to point at a generated synthetic catalog).
     int headless_frames = 0;   // 0 = windowed
     const char *dataset_override = NULL;
+    // M5: --export arms F6's store_deposit on the final headless iteration —
+    // headless mode has no keyboard input, and the validation run must not
+    // launch the GUI. The quirk-preserved F6 block itself is untouched.
+    bool export_on_exit = false;
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--headless") == 0 && i + 1 < argc) headless_frames = atoi(argv[i + 1]);
         if (strcmp(argv[i], "--dataset") == 0 && i + 1 < argc) dataset_override = argv[i + 1];
+        if (strcmp(argv[i], "--export") == 0) export_on_exit = true;
     }
     const bool headless = headless_frames > 0;
 
@@ -1061,7 +1066,11 @@ int main(int argc, char **argv)
             }
         }
       } else {
-        if (simulation_config.n_iteration >= headless_frames) is_running = false;
+        if (simulation_config.n_iteration >= headless_frames) {
+            // M5: fire the (unchanged) F6 export block later this frame.
+            if (export_on_exit) store_deposit = true;
+            is_running = false;
+        }
       }
 
         // Update simulation config
@@ -1186,7 +1195,14 @@ int main(int argc, char **argv)
 
             std::ofstream metadata;
             metadata.open("export/export_metadata.txt", std::ofstream::out);
-            metadata << "dataset: " << DATASET_NAME << std::endl;
+            // M5: record the dataset actually loaded. Upstream wrote the
+            // compile-time DATASET_NAME macro — which was its ONLY possible
+            // source; with the port's --dataset override the macro can be
+            // wrong. Writing the effective `filename` preserves upstream
+            // *semantics* (record what was loaded), not upstream letters;
+            // --dataset is port infrastructure, so this is not a quirk
+            // violation (design §4).
+            metadata << "dataset: " << filename << std::endl;
             metadata << "number of data points: " << data_count << std::endl;
             metadata << "number of agents: " << int(NUM_AGENTS) / 1e6 << "M" << std::endl;
             metadata << "simulation grid resolution: " << int(GRID_RESOLUTION_X) << " x " << int(GRID_RESOLUTION_Y) << " x " << int(GRID_RESOLUTION_Z) << " [vox]" << std::endl;
