@@ -1,6 +1,7 @@
 #include "../cpplib/graphics.h"
 #include "../cpplib/file_system.h"
 #include <cassert>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -14,6 +15,37 @@ static char *load_shader(const char *name, File *out) {
 }
 
 int main() {
+    // --- Test 0 (M5): f32->f16 export conversion, known IEEE 754 vectors.
+    // Spec "Testing" requires a CTest unit for the f32->f16 export conversion;
+    // vectors cover zero/sign, normals, f16 max, overflow->inf, smallest
+    // normal, subnormal, and the round-to-nearest-even tie cases. ---
+    {
+        struct { float in; uint16_t expect; } vec[] = {
+            {0.0f, 0x0000}, {-0.0f, 0x8000},
+            {1.0f, 0x3C00}, {-2.0f, 0xC000}, {0.5f, 0x3800},
+            {65504.0f, 0x7BFF},                  // f16 max finite
+            {65536.0f, 0x7C00},                  // overflow -> +inf
+            {-65536.0f, 0xFC00},                 // overflow -> -inf
+            {INFINITY, 0x7C00}, {-INFINITY, 0xFC00},
+            {6.103515625e-5f, 0x0400},           // smallest normal (2^-14)
+            {5.9604644775390625e-8f, 0x0001},    // smallest subnormal (2^-24)
+            {1.0009765625f, 0x3C01},             // 1 + 2^-10: exactly representable
+            {1.00048828125f, 0x3C00},            // 1 + 2^-11: tie -> even (down)
+            {1.00146484375f, 0x3C02},            // 1 + 3*2^-11: tie -> even (up)
+        };
+        for (auto &t : vec) {
+            uint16_t got = graphics::f32_to_f16(t.in);
+            if (got != t.expect) {
+                fprintf(stderr, "f32_to_f16(%g) = 0x%04X, want 0x%04X\n",
+                        (double)t.in, got, t.expect);
+                assert(false);
+            }
+        }
+        uint16_t nan_bits = graphics::f32_to_f16(NAN);
+        assert((nan_bits & 0x7C00) == 0x7C00 && (nan_bits & 0x03FF) != 0); // any f16 NaN
+        printf("graphics_tests: f32_to_f16 known vectors passed\n");
+    }
+
     bool ok = graphics::init();   // headless: no init_swap_chain
     assert(ok);
 

@@ -481,6 +481,20 @@ Texture2D load_texture2D(std::string filename) {
     return t;
 }
 
+uint16_t f32_to_f16(float v) {
+    // Apple clang's _Float16 is hardware IEEE 754 binary16 with
+    // round-to-nearest-even — the same rounding upstream's R16F texture
+    // applied on every GPU store. The port stores r32float and converts once
+    // at export instead (QUIRK(r16f_channel_truncation), main.cpp), so
+    // quantization matches upstream's pipeline stage-for-stage in rounding
+    // behavior. Inf/NaN/subnormals are defined by the _Float16 conversion;
+    // nothing handled specially (design §3.4).
+    _Float16 h = (_Float16)v;
+    uint16_t bits;
+    memcpy(&bits, &h, sizeof(bits));
+    return bits;
+}
+
 void save_texture3D(Texture3D *texture, std::string filename) {
     (void)texture; (void)filename; warn_once("save_texture3D");
 }
