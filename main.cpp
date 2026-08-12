@@ -1819,6 +1819,7 @@ int main(int argc, char **argv)
     graphics::release(&decay_compute_shader);
     graphics::release(&cs_density_histo);
     graphics::release(&cs_volpath);
+    graphics::release(&cs_volpath_blit);
     graphics::release(&quad_mesh);
     graphics::release(&super_quad_mesh);
     graphics::release(&trail_tex_A);

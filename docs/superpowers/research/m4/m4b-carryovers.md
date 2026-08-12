@@ -1,10 +1,9 @@
 # M4b → M5 carryovers
 
-From the M4b final whole-branch review (READY). M4b closed with volume
-rendering live (VM_VOLUME_TRACE/HALOCOLOR/OVERDENSITY, vs_3d 28-byte stride,
-per-draw cbuffer binds), path tracing volume integration live (cs_volpath
-dispatch + PT accumulation + blit readback), and resizable window support.
-All 7 QUIRK markers verified. M4b fully closed; human visual gate TBD (Task 13).
+From M4b (volume rendering + path tracing port), range 15389d1..HEAD.
+All 12 implementation tasks complete with per-task reviews. Final
+whole-branch review verdict: Ready with fixes (this commit lands those
+fixes). Human visual gate (Task 13) pending.
 
 ## M5 must handle
 
@@ -45,9 +44,10 @@ All 7 QUIRK markers verified. M4b fully closed; human visual gate TBD (Task 13).
 7. **`ps_volume_halocolor` / `ps_volume_velocity` ported but never bound**
    (main.cpp VM_VOLUME regime switch). Both shaders exist, compile, and inherit
    QUIRK(single_stack_2x_compensation) from M3 upstream. To activate: flip
-   `#define REGIME_SDSS 1` logic in main.cpp around line 1200 and verify
-   draw_mesh binds (`ported-not-wired`, out of scope). Same TGA-sampling
-   coverage as ps_volume_trace (palette already live).
+   the `HALO_COLOR_ANALYSIS`/`VELOCITY_ANALYSIS` `#ifdef` logic (toggles around
+   main.cpp:1716-1740, texture setup near main.cpp:532) and verify draw_mesh binds
+   (`ported-not-wired`, out of scope). Same TGA-sampling coverage as ps_volume_trace
+   (palette already live).
 
 ## Inherited open items (unchanged)
 
@@ -75,6 +75,30 @@ From m4a-carryovers.md:
 3. **HUD/histogram overlay geometry still anchored to fixed SCREEN_X/SCREEN_Y**
    (m4a-carryovers item #3): Deferred as upstream behavior change. Already
    documented above.
+
+4. **Behavior divergence (benign, unavoidable): PARTICLES→PT round-trip**: Upstream's
+   PT accumulator was display_tex, which VM_PARTICLES overwrites — so upstream,
+   resuming PT at pt_iteration = N > 0 after visiting particles mode, folded the
+   particle image into the running average (visible ghost). Our separate pt_accum_buffer
+   is untouched by other modes, so PT resumes from pristine history and may look
+   *cleaner* than upstream on mode round-trips. Not a palette/blend defect.
+
+## Inherited open items (from m4a-carryovers.md)
+
+1. **No automated no-imgui-in-tests check**: Only structural CMake fact +
+   one-off otool run. A POST_BUILD nm/otool grep test is cheap insurance.
+
+2. **No frame-lifecycle regression test**: Consider a cheap
+   ImGui::GetFrameCount()-based assert in ui::flush_frame() rather than a
+   windowed test target.
+
+3. **M5 validation inputs**: Reference cubes live at
+   `~/Development/js/skymap/data/raw/mcpm/` (incl. mcpm_sdss_d2/d4/d8.npy).
+   The repo DOES ship the upstream SDSS *visualization* slice at
+   `bin/data/SDSS/galaxiesInSdssSlice_viz_bigger_lumdist_t=0.0.bin`
+   (37,655 galaxies) — usable for visual gates and M5 runs; verify at M5
+   whether it is the same input that produced the published VAC cubes
+   before trusting the Pearson comparison.
 
 ## Post-validation cleanup tickets (one per QUIRK)
 
