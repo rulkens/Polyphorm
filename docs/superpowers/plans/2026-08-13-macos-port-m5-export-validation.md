@@ -40,7 +40,7 @@
 | Input CSV | `~/Development/vendor/python/PolyPhy/data/csv/sample_3D_linW.csv` — 324,901 rows, no header, `x,y,z,weight`, xyz Mpc, weight 10⁹ M☉ (= 1000× Polyphorm's 10¹² M☉ convention) |
 | Shipped-catalog mean weight | 0.013950215 (`bin/data/SDSS/galaxiesInSdssSlice_viz_bigger_lumdist_t=0.0_metadata.txt`) |
 | Packed dataset path | `bin/data/SDSS/sdssGalaxy_rsdCorr_dbscan_e2p0ms3_dz0p001_m10p0_t=0.0{.bin,_metadata.txt}` |
-| Native export size | 712·1200·728·2 = 1,243,929,600 bytes per `.bin` (trace and deposit each) |
+| Native export size | 712·1200·728·2 = 1,244,006,400 bytes per `.bin` (trace and deposit each; erratum fixed post-review — an earlier revision said 1,243,929,600) |
 | Half-res fallback | `GRID_RESOLUTION = 600` → predicted 356×600×364; d8 factors 356/89 = 600/150 = 364/91 = 4 |
 | PolyPhy precedent | ~0.085 3D / ~0.37–0.41 axis-projection Pearson (linear min-max) vs this same reference, after 11 calibration runs with the correct input (risk context only, NOT a target) |
 
@@ -977,7 +977,7 @@ print('grid:', x, y, z)
 for name in ('trace', 'deposit'):
     size = os.path.getsize(f'export/{name}.bin')
     assert size == x * y * z * 2, (name, size)
-print('export sizes OK:', x * y * z * 2, 'bytes each')  # 1,243,929,600 at native
+print('export sizes OK:', x * y * z * 2, 'bytes each')  # 1,244,006,400 at native
 EOF
 ```
 

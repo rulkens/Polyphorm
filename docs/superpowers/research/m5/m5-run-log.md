@@ -116,7 +116,9 @@ Sanity PNG: first-measurement/projections.png.
 
 ### Human gate
 
-Presented to the human partner on 2026-08-13: the table above +
+Queued for presentation to the human partner 2026-08-13 (user AFK at
+measurement time; presentation delivered in the session's wake-up summary):
+the table above +
 projections.png. Per the measure-first decision, the human sets the
 acceptance bar now; misses against that bar trigger the spec's
 quirk-by-quirk A/B hunts (post-M5). Human's decision: <recorded verbatim
