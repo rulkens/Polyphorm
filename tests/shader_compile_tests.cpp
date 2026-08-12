@@ -76,6 +76,10 @@ int main()
     // @group(0) @binding(0), unlike vs_2d.wgsl (V9 — no cbuffer at all).
     check_compiles_vs(SHADER_DIR "/vs_3d.wgsl", 1);
 
+    // M4b Task 4: ps_volume_trace.wgsl declares the full RenderingConfig
+    // cbuffer at @group(0) @binding(0), same as vs_3d.wgsl.
+    check_compiles_ps(SHADER_DIR "/ps_volume_trace.wgsl", 1);
+
     graphics::release();
     printf("All shader compile tests passed\n");
     return 0;

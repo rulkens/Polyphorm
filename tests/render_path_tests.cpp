@@ -1030,6 +1030,179 @@ static void test_resize_cycle_offscreen() {
     graphics::release(&ps);
 }
 
+// ---- Test (M4b Task 4, DESIGN §2.2): ps_volume_trace.wgsl readback ----
+//
+// Same skeleton as test_super_quad_stride_draw (vs_3d.wgsl from disk, 28 B
+// super-quad, 336 B cfg buffer) but with ps_volume_trace.wgsl from disk and
+// real sampled resources (a filled tex_trace + a solid-red tex_false_color),
+// asserting hand-derived expected values (task-4-brief.md step 1):
+//
+//   tex_trace: 4x4x4 R32_FLOAT, every texel = 1.0.
+//   tex_false_color: 2x2 RGBA8_UNORM, every texel = solid red (255,0,0,255)
+//     -- makes the palette SAMPLE POSITION irrelevant, only its color matters.
+//   trims = [0.2, 0.8] on all three axes (tight window: a mis-strided
+//     texcoord read landing on a position/w lane, +-1.0/1.0, would fall
+//     OUTSIDE this window and fail the corner-pixel assertion below).
+//   trim_density = 0.5, sample_weight = 2.0, optical_thickness = 0.25.
+//
+// Hand-derived math (identical to the brief): trace = 1.0 (uniform texture,
+// any sample position). t = (1.0 - 0.5) * 2.0 = 1.0. remap(1.0, 1.0) =
+// 1 - e^-1 = 0.6321206. fragment.rgb = red palette's .rgb = (1,0,0); then
+// the QUIRK(single_stack_2x_compensation) *2.0 at the end of the shader ->
+// (2.0, 0.0, 0.0). fragment.a = optical_thickness * remap(t,1.0) =
+// 0.25 * 0.6321206 = 0.1580301.
+//
+// Reuses super_quad_test_vertices (Task 3, above): with texcoord_map == 1,
+// vs_3d.wgsl passes texcoords through unchanged, so the same
+// u=(x+0.5)/W, v=1-(y+0.5)/H, w=0.25-constant mapping from that test
+// applies here too.
+//   Center pixel (4,4) of an 8x8 RT: texcoord = (0.5625, 0.4375, 0.25) --
+//     inside [0.2,0.8]^3 -> NOT trimmed -> assert (2.0, 0.0, 0.0, 0.1580301).
+//   Corner pixel (0,0): texcoord.x = 0.0625 < 0.2 -> trimmed -> fragment =
+//     vec4(0) even after the *2.0 (0*2==0) -> assert (0,0,0,0), pins the
+//     trim early-out.
+static void test_volume_trace_readback() {
+    const uint32_t RT_W = 8, RT_H = 8;
+    graphics::RenderTarget rt =
+        graphics::get_render_target(RT_W, RT_H, graphics::Format::RGBA32_FLOAT);
+    assert(graphics::is_ready(&rt));
+
+    graphics::set_render_targets_viewport(&rt);
+    graphics::clear_render_target(&rt, 0.0f, 0.0f, 0.0f, 0.0f);
+
+    File vs_f = file_system::read_file(SHADER_DIR "/vs_3d.wgsl");
+    assert(vs_f.data != NULL);
+    graphics::VertexShader vs =
+        graphics::get_vertex_shader_from_code((char *)vs_f.data, vs_f.size);
+    file_system::release_file(vs_f);
+    assert(graphics::is_ready(&vs));
+    assert(vs.uses_group0);
+
+    File ps_f = file_system::read_file(SHADER_DIR "/ps_volume_trace.wgsl");
+    assert(ps_f.data != NULL);
+    graphics::PixelShader ps =
+        graphics::get_pixel_shader_from_code((char *)ps_f.data, ps_f.size);
+    file_system::release_file(ps_f);
+    assert(graphics::is_ready(&ps));
+    assert(ps.uses_group0);
+
+    graphics::set_vertex_shader(&vs);
+    graphics::set_pixel_shader(&ps);
+
+    // tex_trace: 4x4x4 R32_FLOAT, every texel == 1.0.
+    std::vector<float> trace_data(4 * 4 * 4, 1.0f);
+    graphics::Texture3D tex_trace =
+        graphics::get_texture3D(trace_data.data(), 4, 4, 4, graphics::Format::R32_FLOAT, 4);
+    assert(graphics::is_ready(&tex_trace));
+
+    // tex_false_color: 2x2 RGBA8_UNORM, every texel == solid red.
+    uint8_t false_color_data[2 * 2 * 4];
+    for (int i = 0; i < 4; i++) {
+        false_color_data[i * 4 + 0] = 255;
+        false_color_data[i * 4 + 1] = 0;
+        false_color_data[i * 4 + 2] = 0;
+        false_color_data[i * 4 + 3] = 255;
+    }
+    graphics::Texture2D tex_false_color =
+        graphics::get_texture2D(false_color_data, 2, 2, graphics::Format::RGBA8_UNORM, 4);
+    assert(graphics::is_ready(&tex_false_color));
+
+    // Trace slot 0: CLAMP/ANISOTROPIC (matches main.cpp:547 -- linear
+    // filtering an r32float texture; Float32Filterable is a required device
+    // feature, gpu_context.cpp:42/69, so this is safe).
+    graphics::TextureSampler samp_trace =
+        graphics::get_texture_sampler(graphics::CLAMP, graphics::Filter::ANISOTROPIC);
+    assert(graphics::is_ready(&samp_trace));
+    // Palette slot 1: default sampler (CLAMP/POINT).
+    graphics::TextureSampler samp_palette = graphics::get_texture_sampler();
+    assert(graphics::is_ready(&samp_palette));
+
+    graphics::set_texture(&tex_trace, 0);
+    graphics::set_texture_sampler(&samp_trace, 0);
+    graphics::set_texture(&tex_false_color, 1);
+    graphics::set_texture_sampler(&samp_palette, 1);
+
+    RenderingConfigTest cfg = {};
+    set_identity16(cfg.projection);
+    set_identity16(cfg.view);
+    set_identity16(cfg.model);
+    cfg.texcoord_map = 1;
+    cfg.trim_x_min = 0.2f; cfg.trim_x_max = 0.8f;
+    cfg.trim_y_min = 0.2f; cfg.trim_y_max = 0.8f;
+    cfg.trim_z_min = 0.2f; cfg.trim_z_max = 0.8f;
+    cfg.trim_density = 0.5f;
+    cfg.sample_weight = 2.0f;
+    cfg.optical_thickness = 0.25f;
+
+    graphics::ConstantBuffer cfg_buf = graphics::get_constant_buffer(sizeof(RenderingConfigTest));
+    assert(graphics::is_ready(&cfg_buf));
+    graphics::update_constant_buffer(&cfg_buf, &cfg);
+    graphics::set_constant_buffer(&cfg_buf, 0);
+
+    graphics::Mesh quad = graphics::get_mesh(super_quad_test_vertices, super_quad_test_vertices_count,
+                                             super_quad_test_vertices_stride, NULL, 0, 0);
+    assert(graphics::is_ready(&quad));
+
+    // DEVIATION from a literal "set_blend_state(ALPHA)": WebGPU forbids
+    // blending on 32-bit float color targets without the unrequested
+    // "float32-blendable" device feature -- same precedent as
+    // test_offscreen_draw_and_readback's deviation comment above. OPAQUE is
+    // used instead; this test only inspects the RT after a single opaque
+    // draw over a zero-cleared background, so the blend equation choice does
+    // not affect the assertions below.
+    graphics::set_blend_state(graphics::BlendType::OPAQUE);
+    graphics::draw_mesh(&quad);
+    graphics::swap_frames();
+
+    float pixels[RT_W * RT_H * 4];
+    readback_rgba32f(&rt, RT_W, RT_H, pixels);
+
+    // Center pixel (4,4): texcoord (0.5625, 0.4375, 0.25), inside the trim
+    // box -> assert (2.0, 0.0, 0.0, 0.1580301).
+    {
+        uint32_t i = 4u * RT_W + 4u;
+        float r = pixels[i * 4 + 0];
+        float g = pixels[i * 4 + 1];
+        float b = pixels[i * 4 + 2];
+        float a = pixels[i * 4 + 3];
+        const float tol = 1e-4f;
+        assert(fabsf(r - 2.0f) < tol);
+        assert(fabsf(g - 0.0f) < tol);
+        assert(fabsf(b - 0.0f) < tol);
+        assert(fabsf(a - 0.1580301f) < tol);
+    }
+
+    // Corner pixel (0,0): texcoord.x = 0.0625 < 0.2 -> trimmed -> assert
+    // (0,0,0,0), pins the trim early-out.
+    {
+        uint32_t i = 0u * RT_W + 0u;
+        float r = pixels[i * 4 + 0];
+        float g = pixels[i * 4 + 1];
+        float b = pixels[i * 4 + 2];
+        float a = pixels[i * 4 + 3];
+        const float tol = 1e-6f;
+        assert(fabsf(r - 0.0f) < tol);
+        assert(fabsf(g - 0.0f) < tol);
+        assert(fabsf(b - 0.0f) < tol);
+        assert(fabsf(a - 0.0f) < tol);
+    }
+
+    printf("render_path_tests: ps_volume_trace readback passed "
+           "(center=(2.0,0.0,0.0,0.1580301), corner trimmed to zero)\n");
+
+    graphics::unset_texture(0);
+    graphics::unset_texture(1);
+    graphics::release(&quad);
+    graphics::release(&vs);
+    graphics::release(&ps);
+    graphics::release(&samp_trace);
+    graphics::release(&samp_palette);
+    graphics::release(&tex_trace);
+    graphics::release(&tex_false_color);
+    graphics::release(&cfg_buf);
+    graphics::release(&rt);
+}
+
 int main() {
     bool ok = graphics::init();   // headless: no init_swap_chain
     assert(ok);
@@ -1042,6 +1215,7 @@ int main() {
     test_super_quad_stride_draw();
     test_compute_sampler_pairing();
     test_resize_cycle_offscreen();
+    test_volume_trace_readback();
 
     graphics::release();
     printf("All render path tests passed\n");
