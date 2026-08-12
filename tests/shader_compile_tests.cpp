@@ -94,6 +94,12 @@ int main()
     check_compiles_ps(SHADER_DIR "/ps_volume_halocolor.wgsl", 1);
     check_compiles_ps(SHADER_DIR "/ps_volume_velocity.wgsl", 1);
 
+    // M4b Task 8: cs_volpath.wgsl (the accumulator buffer conversion,
+    // DESIGN §2.6) and the new cs_volpath_blit.wgsl (buffer -> display_tex,
+    // no HLSL counterpart, same class as M3's atomic buffer + blit pair).
+    check_compiles(SHADER_DIR "/cs_volpath.wgsl", 1);
+    check_compiles(SHADER_DIR "/cs_volpath_blit.wgsl", 0);
+
     graphics::release();
     printf("All shader compile tests passed\n");
     return 0;
