@@ -516,15 +516,17 @@ int main(int argc, char **argv)
     PixelShader pixel_shader_2d = load_ps(SHADER_ROOT "/ps_particles_color.wgsl");
 
     // M3: cs_agents_sort (upstream default-off)
-    // M4: cs_volpath + remaining vs_/ps_ shaders
+    // M4b: only sort_shader (upstream default-off) and the two file-parity
+    // PS ports (ps_volume_halocolor, ps_volume_velocity) remain unwired.
     ComputeShader sort_shader = {};
-    ComputeShader cs_volpath = {};
+    ComputeShader cs_volpath = load_compute(SHADER_ROOT "/cs_volpath.wgsl");
+    ComputeShader cs_volpath_blit = load_compute(SHADER_ROOT "/cs_volpath_blit.wgsl");
     VertexShader vertex_shader = load_vs(SHADER_ROOT "/vs_3d.wgsl");
     PixelShader pixel_shader = load_ps(SHADER_ROOT "/ps_volume_trace.wgsl"),
                 ps_volume_highlight = load_ps(SHADER_ROOT "/ps_volume_highlight.wgsl"),
                 ps_volume_halocolor = {},
                 ps_volume_overdensity = load_ps(SHADER_ROOT "/ps_volume_overdensity.wgsl"),
-                ps_volume_velocity = {}, ps_volpath = {};
+                ps_volume_velocity = {}, ps_volpath = load_ps(SHADER_ROOT "/ps_volpath.wgsl");
 
     // Textures for the simulation
     #ifdef HALO_COLOR_ANALYSIS
@@ -658,6 +660,11 @@ int main(int argc, char **argv)
     // WGSL has no atomic storage textures — atomic<u32> buffer, row-major
     // y*width+x. See docs/superpowers/research/m3/wgsl-drafts/translation-notes.md §0.1.
     StructuredBuffer display_accum_buffer = graphics::get_structured_buffer(sizeof(uint32_t), window_width * window_height);
+
+    // PT accumulator: vec4<f32> per pixel. Replaces the D3D11 RWTexture2D<float4>
+    // read-modify-write on display_tex, which WGSL storage textures can't express
+    // (read_write is r32*-only) — design §2.6 option (a), M3 buffer+blit precedent.
+    StructuredBuffer pt_accum_buffer = graphics::get_structured_buffer(4 * sizeof(float), window_width * window_height);
 
     // Set up 3D texture quad mesh.
     float super_quad_vertices_template[] = {
@@ -896,6 +903,15 @@ int main(int argc, char **argv)
                 graphics::release(&display_accum_buffer);
                 display_accum_buffer = graphics::get_structured_buffer(sizeof(uint32_t), window_width * window_height);
                 assert(graphics::is_ready(&display_accum_buffer));
+
+                graphics::release(&pt_accum_buffer);
+                pt_accum_buffer = graphics::get_structured_buffer(sizeof(float) * 4, window_width * window_height);
+                assert(graphics::is_ready(&pt_accum_buffer));
+
+                // m4a-carryovers #1: resize during PT accumulation recreates the accumulator
+                // while pt_iteration stays nonzero — restart accumulation instead of
+                // averaging against a fresh (zeroed) buffer at a stale iteration count.
+                reset_pt = true;
 
                 aspect_ratio = float(window_width) / float(window_height);
                 if (CAMERA_FOV > 0.0)
@@ -1376,7 +1392,7 @@ int main(int argc, char **argv)
                 if (run_pt && rendering_config.pt_iteration < 1e5 && graphics::is_ready(&cs_volpath)) {
                     graphics::set_compute_shader(&cs_volpath);
                     graphics::set_constant_buffer(&rendering_settings_buffer, 0);
-                    graphics::set_texture_compute(&display_tex, 0);
+                    graphics::set_structured_buffer(&pt_accum_buffer, 0);
                     graphics::set_texture_sampled_compute(&trace_tex, 1);
                     graphics::set_texture_sampler_compute(&tex_sampler_trace, 1);
                     if (is_a) {
@@ -1390,16 +1406,29 @@ int main(int argc, char **argv)
                     graphics::set_texture_sampler_compute(&tex_sampler_color_palette, 3);
                     graphics::set_texture_sampled_compute(&palette_data_tex, 4);
                     graphics::set_texture_sampler_compute(&tex_sampler_color_palette, 4);
+                    // QUIRK(pt_ceil_dispatch): upstream truncates (screen/10) — bit-identical at
+                    // upstream's fixed window sizes (exact multiples of 10). Resizable windows are
+                    // this port's own extension; round UP so no dead pixel band, with the matching
+                    // OOB guard inside cs_volpath.wgsl. Adjudicated 2026-08-12.
                     graphics::run_compute(
-                        rendering_config.screen_width / int(PT_GROUP_SIZE_X),
-                        rendering_config.screen_height / int(PT_GROUP_SIZE_Y),
+                        (int(rendering_config.screen_width) + int(PT_GROUP_SIZE_X) - 1) / int(PT_GROUP_SIZE_X),
+                        (int(rendering_config.screen_height) + int(PT_GROUP_SIZE_Y) - 1) / int(PT_GROUP_SIZE_Y),
                         1);
-                    graphics::unset_texture_compute(0);
+                    graphics::unset_structured_buffer(0);
                     graphics::unset_texture_sampled_compute(1);
                     graphics::unset_texture_sampled_compute(2);
                     graphics::unset_texture_sampled_compute(3);
                     // upstream omission: slot 4 (palette+sampler) was never unset — harmless in D3D11, fatal under run_compute's strict-match contract; same adjudication class as the :1280 typo
                     graphics::unset_texture_sampled_compute(4);
+
+                    // Blit accumulator -> display_tex for ps_volpath to sample (design §2.6).
+                    graphics::set_compute_shader(&cs_volpath_blit);
+                    graphics::set_structured_buffer(&pt_accum_buffer, 0);
+                    graphics::set_texture_compute(&display_tex, 1);
+                    graphics::run_compute(window_width, window_height, 1);
+                    graphics::unset_structured_buffer(0);
+                    graphics::unset_texture_compute(1);
+
                     rendering_config.pt_iteration++;
                 }
 
@@ -1812,6 +1841,7 @@ int main(int argc, char **argv)
     graphics::release(&density_histogram_buffer);
     graphics::release(&halos_densities_buffer);
     graphics::release(&display_accum_buffer);
+    graphics::release(&pt_accum_buffer);
     graphics::release(&rendering_settings_buffer);
     graphics::release();
 
