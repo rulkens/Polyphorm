@@ -742,6 +742,114 @@ static void test_particle_chain_pixels_exist() {
     graphics::release(&cfg_buf);
 }
 
+// ---- Test (M4b Task 3, DESIGN §3): 28-byte-stride vertex path, first real
+// draw coverage for cpplib/graphics.cpp's `case 28:` fill_vertex_attributes
+// branch (Float32x4 position @ offset 0 loc 0, Float32x3 texcoord @ offset
+// 16 loc 1) -- present since M3 but never exercised by an actual draw_mesh
+// call until vs_3d.wgsl existed. Also the first positive-path coverage of
+// draw_mesh's group-0 branch (graphics.cpp:807-818).
+//
+// Single 6-vertex quad shaped like one copy of main.cpp's
+// super_quad_vertices_template (main.cpp:660-675), covering NDC [-1,1] x
+// [-1,1] at z=0, w=1. Paired with vs_3d.wgsl (identity projection/view/model
+// -> position passes through unchanged) and a trivial fragment shader that
+// visualizes the interstage texcoord directly.
+static float super_quad_test_vertices[] = {
+    -1.f,-1.f,0.f,1.f,  0.f,0.f,0.25f,
+     1.f, 1.f,0.f,1.f,  1.f,1.f,0.25f,
+    -1.f, 1.f,0.f,1.f,  0.f,1.f,0.25f,
+    -1.f,-1.f,0.f,1.f,  0.f,0.f,0.25f,
+     1.f,-1.f,0.f,1.f,  1.f,0.f,0.25f,
+     1.f, 1.f,0.f,1.f,  1.f,1.f,0.25f,
+};   // stride = 7 * sizeof(float) = 28, matches super_quad_vertices_stride
+static uint32_t super_quad_test_vertices_stride = sizeof(float) * 7;
+static uint32_t super_quad_test_vertices_count = 6;
+
+static const char *TEXCOORD_VIS_PS_WGSL = R"(
+@fragment fn main(@location(0) tc : vec3<f32>) -> @location(0) vec4<f32> {
+    return vec4<f32>(tc, 1.0);
+}
+)";
+
+static void test_super_quad_stride_draw() {
+    const uint32_t RT_W = 4, RT_H = 4;
+    graphics::RenderTarget rt =
+        graphics::get_render_target(RT_W, RT_H, graphics::Format::RGBA32_FLOAT);
+    assert(graphics::is_ready(&rt));
+
+    graphics::set_render_targets_viewport(&rt);
+    graphics::clear_render_target(&rt, 0.0f, 0.0f, 0.0f, 0.0f);
+
+    File vs_f = file_system::read_file(SHADER_DIR "/vs_3d.wgsl");
+    assert(vs_f.data != NULL);
+    graphics::VertexShader vs =
+        graphics::get_vertex_shader_from_code((char *)vs_f.data, vs_f.size);
+    file_system::release_file(vs_f);
+    assert(graphics::is_ready(&vs));
+    assert(vs.uses_group0);
+
+    graphics::PixelShader ps =
+        graphics::get_pixel_shader_from_code((char *)TEXCOORD_VIS_PS_WGSL, (uint32_t)strlen(TEXCOORD_VIS_PS_WGSL));
+    assert(graphics::is_ready(&ps));
+
+    graphics::set_vertex_shader(&vs);
+    graphics::set_pixel_shader(&ps);
+
+    // Identity matrices -> vs_3d passes positions through unchanged;
+    // texcoord_map == 1 -> vs_3d passes texcoords through unchanged
+    // (HLSL:27-28 / vs_3d.wgsl's first branch).
+    RenderingConfigTest cfg = {};
+    set_identity16(cfg.projection);
+    set_identity16(cfg.view);
+    set_identity16(cfg.model);
+    cfg.texcoord_map = 1;
+
+    graphics::ConstantBuffer cfg_buf = graphics::get_constant_buffer(sizeof(RenderingConfigTest));
+    assert(graphics::is_ready(&cfg_buf));
+    graphics::update_constant_buffer(&cfg_buf, &cfg);
+    graphics::set_constant_buffer(&cfg_buf, 0);
+
+    graphics::Mesh quad = graphics::get_mesh(super_quad_test_vertices, super_quad_test_vertices_count,
+                                             super_quad_test_vertices_stride, NULL, 0, 0);
+    assert(graphics::is_ready(&quad));
+
+    graphics::set_blend_state(graphics::BlendType::OPAQUE);
+    graphics::draw_mesh(&quad);
+    graphics::swap_frames();
+
+    float pixels[RT_W * RT_H * 4];
+    readback_rgba32f(&rt, RT_W, RT_H, pixels);
+
+    // RT row 0 is NDC top (y_ndc = 1 - 2*(y+0.5)/H); v = (y_ndc+1)/2 =
+    // 1 - (y+0.5)/H. u = (x_ndc+1)/2 = (x+0.5)/W directly. b is the constant
+    // 0.25 texcoord.z passed through unchanged; a == 1.0 from the PS. Any
+    // attribute offset/stride mistake shifts position lanes (+-1.0 / w=1.0)
+    // into the texcoord and breaks these values.
+    const float tol = 1e-5f;
+    for (uint32_t y = 0; y < RT_H; y++) {
+        for (uint32_t x = 0; x < RT_W; x++) {
+            uint32_t i = y * RT_W + x;
+            float r = pixels[i * 4 + 0];
+            float g = pixels[i * 4 + 1];
+            float b = pixels[i * 4 + 2];
+            float a = pixels[i * 4 + 3];
+            float expect_r = (x + 0.5f) / 4.0f;
+            float expect_g = 1.0f - (y + 0.5f) / 4.0f;
+            assert(fabsf(r - expect_r) < tol);
+            assert(fabsf(g - expect_g) < tol);
+            assert(fabsf(b - 0.25f) < tol);
+            assert(fabsf(a - 1.0f) < tol);
+        }
+    }
+    printf("render_path_tests: super_quad 28-byte-stride draw passed (4x4 texcoord-visualization RT matches hand-derived values)\n");
+
+    graphics::release(&quad);
+    graphics::release(&vs);
+    graphics::release(&ps);
+    graphics::release(&cfg_buf);
+    graphics::release(&rt);
+}
+
 // ---- Test 5 (Task 1 / DESIGN §6.3): compute texture+sampler pairing at the
 // same slot, end-to-end through the 16+N sampler binding scheme ----
 //
@@ -931,6 +1039,7 @@ int main() {
     test_load_texture2D_palette();
     test_unset_texture_clears_sampler();
     test_particle_chain_pixels_exist();
+    test_super_quad_stride_draw();
     test_compute_sampler_pairing();
     test_resize_cycle_offscreen();
 

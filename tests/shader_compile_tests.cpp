@@ -72,6 +72,10 @@ int main()
     check_compiles_vs(SHADER_DIR "/vs_2d.wgsl", 0);
     check_compiles_ps(SHADER_DIR "/ps_particles_color.wgsl", 0);
 
+    // M4b Task 3: vs_3d.wgsl declares the full RenderingConfig cbuffer at
+    // @group(0) @binding(0), unlike vs_2d.wgsl (V9 — no cbuffer at all).
+    check_compiles_vs(SHADER_DIR "/vs_3d.wgsl", 1);
+
     graphics::release();
     printf("All shader compile tests passed\n");
     return 0;
