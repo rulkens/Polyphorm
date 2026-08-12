@@ -85,6 +85,15 @@ int main()
     check_compiles_ps(SHADER_DIR "/ps_volume_highlight.wgsl", 1);
     check_compiles_ps(SHADER_DIR "/ps_volume_overdensity.wgsl", 1);
 
+    // M4b Task 7: ps_volume_halocolor.wgsl / ps_volume_velocity.wgsl —
+    // file-parity ports only (dead in REGIME_SDSS: VELOCITY_ANALYSIS /
+    // HALO_COLOR_ANALYSIS are #ifdef'd out, main.cpp:38-40). Same full
+    // RenderingConfig cbuffer shape as ps_volume_trace.wgsl; NOT wired into
+    // main.cpp (ps_volume_halocolor/ps_volume_velocity stay `= {}`) and get
+    // no draw-path test coverage beyond this compile check.
+    check_compiles_ps(SHADER_DIR "/ps_volume_halocolor.wgsl", 1);
+    check_compiles_ps(SHADER_DIR "/ps_volume_velocity.wgsl", 1);
+
     graphics::release();
     printf("All shader compile tests passed\n");
     return 0;
