@@ -121,5 +121,7 @@ measurement time; presentation delivered in the session's wake-up summary):
 the table above +
 projections.png. Per the measure-first decision, the human sets the
 acceptance bar now; misses against that bar trigger the spec's
-quirk-by-quirk A/B hunts (post-M5). Human's decision: <recorded verbatim
-after the gate>
+quirk-by-quirk A/B hunts (post-M5). Human's decision (2026-08-13, verbatim):
+"accept at ≥0.9" — the measured 3D log-trace Pearson at d8 (+0.9640 masked /
++0.9570 unmasked) clears the accepted bar. M5 PASSED; milestone closed.
+No quirk A/B hunts triggered.
