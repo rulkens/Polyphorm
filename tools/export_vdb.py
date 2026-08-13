@@ -71,6 +71,17 @@ def load_volume(path, res):
     return np.ascontiguousarray(data.transpose(2, 1, 0))   # [x, y, z]
 
 
+def block_average(arr, f):
+    """Downsample [x,y,z] by factor f per axis (block mean, zero-padded)."""
+    if f == 1:
+        return arr
+    pad = [(0, (-s) % f) for s in arr.shape]
+    if any(p for _, p in pad):
+        arr = np.pad(arr, pad)          # zero padding = background
+    nx, ny, nz = (s // f for s in arr.shape)
+    return arr.reshape(nx, f, ny, f, nz, f).mean(axis=(1, 3, 5))
+
+
 def log_normalize(arr, threshold, white_percentile):
     """Map trace to [0,1] density: 0 below `threshold`, then a log ramp.
 
@@ -128,6 +139,10 @@ def main():
     ap.add_argument("--white", type=float, default=99.9,
                     help="percentile of kept values mapped to density 1.0 "
                          "(default 99.9)")
+    ap.add_argument("--downsample", type=int, default=2, choices=(1, 2, 3, 4),
+                    help="block-average the grid by this factor per axis "
+                         "before export (default 2 — the full 622M-voxel "
+                         "grid makes Blender crawl; 1 = native resolution)")
     ap.add_argument("--scale", type=float, default=0.01,
                     help="scene meters per Mpc — Blender reads the VDB "
                          "transform in meters (default 0.01: 1 Mpc = 1 cm, "
@@ -154,17 +169,21 @@ def main():
     if spread > 0.01:
         print(f"warning: voxels are {spread * 100.0:.1f}% anisotropic "
               f"({voxel_sizes}); using isotropic mean {voxel_mpc:.5f} Mpc")
+    voxel_mpc *= args.downsample
     voxel_size = voxel_mpc * args.scale
-    print(f"grid {res[0]}x{res[1]}x{res[2]}, voxel {voxel_mpc:.5f} Mpc "
-          f"-> {voxel_size:.6g} scene meters (box "
-          f"{size_mpc[0] * args.scale:.3g} x {size_mpc[1] * args.scale:.3g} "
-          f"x {size_mpc[2] * args.scale:.3g} m)")
+    print(f"grid {res[0]}x{res[1]}x{res[2]}"
+          + (f" -> 1/{args.downsample}" if args.downsample > 1 else "")
+          + f", voxel {voxel_mpc:.5f} Mpc -> {voxel_size:.6g} scene meters "
+          f"(box {size_mpc[0] * args.scale:.3g} x "
+          f"{size_mpc[1] * args.scale:.3g} x "
+          f"{size_mpc[2] * args.scale:.3g} m)")
 
     fields = ("trace", "deposit") if args.field == "both" else (args.field,)
     grids = []
     for field in fields:
         print(f"loading {field}.bin ...")
         arr = load_volume(args.export_dir / f"{field}.bin", res)
+        arr = block_average(arr, args.downsample)
         if not args.raw:
             arr = log_normalize(arr, args.threshold, args.white)
         # Blender's Principled Volume reads a grid named "density" by
