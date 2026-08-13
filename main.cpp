@@ -1816,6 +1816,28 @@ int main(int argc, char **argv)
             }
 
             ui::end_panel(&panel);
+
+            // Port QoL: keyboard/mouse reference in its own panel, collapsed
+            // by default (state persists via imgui.ini after first launch).
+            Panel help = ui::start_panel_collapsed("SHORTCUTS", Vector2(0.0, 0.0), 1.0);
+            ui::add_text(&help, "ESC     quit");
+            ui::add_text(&help, "F1      show/hide UI");
+            ui::add_text(&help, "F2      reset particles + trails");
+            ui::add_text(&help, "F3      pause/resume simulation");
+            ui::add_text(&help, "F4      auto-orbit camera");
+            ui::add_text(&help, "F5      toggle agent capture (export/agents.txt)");
+            ui::add_text(&help, "F6      export deposit/trace/metadata (export/<timestamp>/)");
+            ui::add_text(&help, "F7      toggle frame capture (stub in port)");
+            ui::add_text(&help, "F8      clear trace");
+            ui::add_text(&help, "F9      save camera + visual state");
+            ui::add_text(&help, "F10     restore camera + visual state");
+            ui::add_text(&help, "1       HDR screenshot (stub in port)");
+            ui::add_text(&help, "");
+            ui::add_text(&help, "L-drag  orbit camera");
+            ui::add_text(&help, "R-drag  pan camera");
+            ui::add_text(&help, "scroll  zoom");
+            ui::end_panel(&help);
+
             ui::end();
         }
 

@@ -132,6 +132,12 @@ Panel start_panel(char *name, float x, float y, float width) {
     return start_panel(name, Vector2(x, y), width);
 }
 
+Panel start_panel_collapsed(char *name, Vector2 pos, float width) {
+    ensure_frame_open();
+    ImGui::SetNextWindowCollapsed(true, ImGuiCond_FirstUseEver);
+    return start_panel(name, pos, width);
+}
+
 void end_panel(Panel *) {
     ImGui::End();
 }
@@ -162,6 +168,11 @@ bool add_toggle(Panel *, char *label, bool *state) {
 bool add_slider(Panel *, char *label, float *pos, float min, float max) {
     ensure_frame_open();
     return ImGui::SliderFloat(label, pos, min, max);
+}
+
+void add_text(Panel *, const char *text) {
+    ensure_frame_open();
+    ImGui::TextUnformatted(text);
 }
 
 void release() {
