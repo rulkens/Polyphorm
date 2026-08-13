@@ -11,6 +11,8 @@
 #include <cstddef>
 #include <cstring>
 #include <cstdlib>
+#include <ctime>
+#include <filesystem>
 #include <sstream>
 #include <fstream>
 
@@ -1197,16 +1199,23 @@ int main(int argc, char **argv)
         // Export the current state of the simulation
         if (store_deposit)
         {
-            printf("Exporting simulation data...\n");
             store_deposit = false;
+            // Each export lands in its own timestamped subfolder so repeated
+            // F6 presses (or --export runs) never overwrite each other.
+            char export_timestamp[32];
+            time_t export_now = time(nullptr);
+            strftime(export_timestamp, sizeof(export_timestamp), "%Y-%m-%d_%H-%M-%S", localtime(&export_now));
+            std::string export_dir = std::string("export/") + export_timestamp;
+            std::filesystem::create_directories(export_dir);
+            printf("Exporting simulation data to %s/ ...\n", export_dir.c_str());
             if (is_a)
-                graphics::save_texture3D(&trail_tex_A, "export/deposit");
+                graphics::save_texture3D(&trail_tex_A, export_dir + "/deposit");
             else
-                graphics::save_texture3D(&trail_tex_B, "export/deposit");
-            graphics::save_texture3D(&trace_tex, "export/trace");
+                graphics::save_texture3D(&trail_tex_B, export_dir + "/deposit");
+            graphics::save_texture3D(&trace_tex, export_dir + "/trace");
 
             std::ofstream metadata;
-            metadata.open("export/export_metadata.txt", std::ofstream::out);
+            metadata.open(export_dir + "/export_metadata.txt", std::ofstream::out);
             // M5: record the dataset actually loaded. Upstream wrote the
             // compile-time DATASET_NAME macro — which was its ONLY possible
             // source; with the port's --dataset override the macro can be
@@ -1234,7 +1243,7 @@ int main(int argc, char **argv)
 
             graphics::capture_structured_buffer(&halos_densities_buffer, halos_densities, data_count, sizeof(float));
             std::ofstream halos_measurements;
-            halos_measurements.open("export/halos_measurements.csv", std::ofstream::out);
+            halos_measurements.open(export_dir + "/halos_measurements.csv", std::ofstream::out);
             halos_measurements.precision(5);
             halos_measurements << "M200b/10^12 | Trace | X (world) | Y (world) | Z (world) | X (grid) | Y (grid) | Z (grid) " << std::endl;
             for (int i = 0; i < data_count; ++i) {
