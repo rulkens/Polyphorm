@@ -71,13 +71,28 @@ def load_volume(path, res):
     return np.ascontiguousarray(data.transpose(2, 1, 0))   # [x, y, z]
 
 
-def log_normalize(arr, eps):
-    """log10(1 + x/eps), scaled to [0, 1]. Zeros stay exactly zero."""
-    np.divide(arr, eps, out=arr)
-    np.log1p(arr, out=arr)          # ln(1 + x/eps); constant factor drops
-    peak = float(arr.max())
-    if peak > 0.0:
-        arr /= peak
+def log_normalize(arr, threshold, white_percentile):
+    """Map trace to [0,1] density: 0 below `threshold`, then a log ramp.
+
+    The MCPM trace is ~30% nonzero, but half of that is faint haze from
+    wandering agents (median nonzero ~0.086 on the SDSS run) — mapped
+    naively it fills the volume and renders as a noisy box. The in-app
+    renderer hides it with TRIM DENSITY; `threshold` plays that role
+    here. The white point is a high percentile of the kept values (not
+    the absolute max) so a handful of hot voxels don't crush contrast.
+    """
+    np.divide(arr, threshold, out=arr)
+    np.maximum(arr, 1.0, out=arr)        # below threshold -> 1 -> log 0
+    np.log10(arr, out=arr)
+    kept = arr[arr > 0.0]
+    if kept.size:
+        white = float(np.percentile(kept, white_percentile))
+        if white > 0.0:
+            arr /= white
+        np.minimum(arr, 1.0, out=arr)    # clip the few voxels above white
+        print(f"  kept {kept.size:,} voxels above threshold "
+              f"({100.0 * kept.size / arr.size:.1f}%), white point "
+              f"p{white_percentile} = {threshold * 10.0 ** white:.4g} (raw)")
     return arr
 
 
@@ -106,9 +121,13 @@ def main():
                     help="output .vdb path (default: <export_dir>/volume.vdb)")
     ap.add_argument("--raw", action="store_true",
                     help="export raw values instead of log-normalized [0,1]")
-    ap.add_argument("--eps", type=float, default=1e-2,
-                    help="log compression knee: density = log(1 + x/eps), "
-                         "normalized (default 1e-2)")
+    ap.add_argument("--threshold", type=float, default=0.1,
+                    help="raw trace value below which voxels become empty "
+                         "(default 0.1 — cuts the wandering-agent haze; "
+                         "raise to ~1.0 for a sharper filaments-only look)")
+    ap.add_argument("--white", type=float, default=99.9,
+                    help="percentile of kept values mapped to density 1.0 "
+                         "(default 99.9)")
     ap.add_argument("--tolerance", type=float, default=0.0,
                     help="values within this of 0 become inactive background "
                          "(default 0.0: prune exact zeros only)")
@@ -139,7 +158,7 @@ def main():
         print(f"loading {field}.bin ...")
         arr = load_volume(args.export_dir / f"{field}.bin", res)
         if not args.raw:
-            arr = log_normalize(arr, args.eps)
+            arr = log_normalize(arr, args.threshold, args.white)
         # Blender's Principled Volume reads a grid named "density" by
         # default — the trace (the MCPM result) gets that name.
         name = "density" if field == "trace" else field
