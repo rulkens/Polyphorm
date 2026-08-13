@@ -433,6 +433,12 @@ int main(int argc, char **argv)
     printf("\n-> input data points: %d\n", data_count);
     printf("-> number of agents: %d\n", NUM_AGENTS);
     int32_t NUM_PARTICLES = NUM_AGENTS + data_count;
+    // Port QoL: agent count selected at runtime via the AGENT COUNT combo.
+    // Buffers stay allocated for the full NUM_AGENTS (the config.polyp
+    // value = the selectable maximum); dispatches cover only
+    // active_agents + data_count particles. Headless runs never touch the
+    // UI, so active_agents == NUM_AGENTS there (validation unaffected).
+    int32_t active_agents = NUM_AGENTS;
 
     // World and grid setup
         // Set world size to encapsulate data
@@ -829,6 +835,24 @@ int main(int argc, char **argv)
     };
     reset_eplot();
 
+    // Full particles+trails reset — shared by the F2 key and the AGENT
+    // COUNT combo (body unchanged from the upstream F2 handler).
+    auto reset_particles_and_trails = [&]() {
+        update_particles(particles_x, particles_y, particles_z, particles_phi, particles_theta, particles_weights,
+                        NUM_PARTICLES, GRID_RESOLUTION_X, GRID_RESOLUTION_Y, GRID_RESOLUTION_Z, WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z, WORLD_CENTER_X, WORLD_CENTER_Y, WORLD_CENTER_Z, mean_weight);
+        graphics::update_structured_buffer(&particles_buffer_x, particles_x);
+        graphics::update_structured_buffer(&particles_buffer_y, particles_y);
+        graphics::update_structured_buffer(&particles_buffer_z, particles_z);
+        graphics::update_structured_buffer(&particles_buffer_phi, particles_phi);
+        graphics::update_structured_buffer(&particles_buffer_theta, particles_theta);
+        graphics::update_structured_buffer(&particles_buffer_weights, particles_weights);
+        graphics::clear_texture(&trail_tex_A, 0.0f);
+        graphics::clear_texture(&trail_tex_B, 0.0f);
+        graphics::clear_texture(&trace_tex, 0.0f);
+        reset_eplot();
+        simulation_config.n_iteration = 0;
+    };
+
     // Render loop
     bool is_running = true;
     bool is_a = true;
@@ -1015,21 +1039,7 @@ int main(int argc, char **argv)
 
             if (input::key_pressed(KeyCode::ESC)) is_running = false; 
             if (input::key_pressed(KeyCode::F1)) show_ui = !show_ui; 
-            if (input::key_pressed(KeyCode::F2)) { // Reset particles + trails
-                update_particles(particles_x, particles_y, particles_z, particles_phi, particles_theta, particles_weights,
-                                NUM_PARTICLES, GRID_RESOLUTION_X, GRID_RESOLUTION_Y, GRID_RESOLUTION_Z, WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z, WORLD_CENTER_X, WORLD_CENTER_Y, WORLD_CENTER_Z, mean_weight);
-                graphics::update_structured_buffer(&particles_buffer_x, particles_x);
-                graphics::update_structured_buffer(&particles_buffer_y, particles_y);
-                graphics::update_structured_buffer(&particles_buffer_z, particles_z);
-                graphics::update_structured_buffer(&particles_buffer_phi, particles_phi);
-                graphics::update_structured_buffer(&particles_buffer_theta, particles_theta);
-                graphics::update_structured_buffer(&particles_buffer_weights, particles_weights);
-                graphics::clear_texture(&trail_tex_A, 0.0f);
-                graphics::clear_texture(&trail_tex_B, 0.0f);
-                graphics::clear_texture(&trace_tex, 0.0f);
-                reset_eplot();
-                simulation_config.n_iteration = 0;
-            }
+            if (input::key_pressed(KeyCode::F2)) reset_particles_and_trails();
             if (input::key_pressed(KeyCode::F3)) run_mold = !run_mold;
             if (input::key_pressed(KeyCode::F4)) turning_camera = !turning_camera;
             if (input::key_pressed(KeyCode::F5)) capture_agents = !capture_agents;
@@ -1108,7 +1118,7 @@ int main(int argc, char **argv)
             graphics::set_structured_buffer(&particles_buffer_phi, 5);
             graphics::set_structured_buffer(&particles_buffer_theta, 6);
             graphics::set_structured_buffer(&particles_buffer_weights, 7);
-            int32_t grid_z = (NUM_PARTICLES / 100) / THREAD_GROUP_SIZE;
+            int32_t grid_z = ((active_agents + data_count) / 100) / THREAD_GROUP_SIZE;
             graphics::run_compute(10, 10, grid_z);
             graphics::unset_texture_compute(0);
             graphics::unset_texture_compute(1);
@@ -1131,7 +1141,7 @@ int main(int argc, char **argv)
             graphics::set_structured_buffer(&particles_buffer_phi, 5);
             graphics::set_structured_buffer(&particles_buffer_theta, 6);
             graphics::set_structured_buffer(&particles_buffer_weights, 7);
-            int32_t grid_z = (NUM_PARTICLES / 100) / THREAD_GROUP_SIZE;
+            int32_t grid_z = ((active_agents + data_count) / 100) / THREAD_GROUP_SIZE;
             // different attempts at addressing
             for (int i = 0; i < 256; ++i) {
                 graphics::run_compute(10, 10, grid_z / 256);
@@ -1184,7 +1194,7 @@ int main(int argc, char **argv)
             graphics::set_structured_buffer(&particles_buffer_weights, 5);
             graphics::set_structured_buffer(&halos_densities_buffer, 6);
 
-            int32_t grid_z = (NUM_PARTICLES / 100) / THREAD_GROUP_SIZE;
+            int32_t grid_z = ((active_agents + data_count) / 100) / THREAD_GROUP_SIZE;
             graphics::run_compute(10, 10, grid_z);
 
             graphics::unset_texture_compute(0);
@@ -1225,7 +1235,7 @@ int main(int argc, char **argv)
             // violation (design §4).
             metadata << "dataset: " << filename << std::endl;
             metadata << "number of data points: " << data_count << std::endl;
-            metadata << "number of agents: " << int(NUM_AGENTS) / 1e6 << "M" << std::endl;
+            metadata << "number of agents: " << active_agents / 1e6 << "M" << std::endl;
             metadata << "simulation grid resolution: " << int(GRID_RESOLUTION_X) << " x " << int(GRID_RESOLUTION_Y) << " x " << int(GRID_RESOLUTION_Z) << " [vox]" << std::endl;
             metadata << "simulation grid size: " << WORLD_SIZE_X << " x " << WORLD_SIZE_Y << " x " << WORLD_SIZE_Z << " [mpc]" << std::endl;
             metadata << "simulation grid center: (" << WORLD_CENTER_X << ", " << WORLD_CENTER_Y << ", " << WORLD_CENTER_Z << ") [mpc]" << std::endl;
@@ -1280,15 +1290,16 @@ int main(int argc, char **argv)
                 printf("Done exporting agents.\n");
             } else {
                 printf("Exporting agents, timestep %d/%d...\n", timestep_counter+1, N_AGENT_TIMESTEPS_TO_CAPTURE);
-                graphics::capture_structured_buffer(&particles_buffer_x, particles_x, NUM_PARTICLES, sizeof(float));
-                graphics::capture_structured_buffer(&particles_buffer_y, particles_y, NUM_PARTICLES, sizeof(float));
-                graphics::capture_structured_buffer(&particles_buffer_z, particles_z, NUM_PARTICLES, sizeof(float));
-                graphics::capture_structured_buffer(&particles_buffer_weights, particles_weights, NUM_PARTICLES, sizeof(float));
+                int32_t active_particles = active_agents + data_count;
+                graphics::capture_structured_buffer(&particles_buffer_x, particles_x, active_particles, sizeof(float));
+                graphics::capture_structured_buffer(&particles_buffer_y, particles_y, active_particles, sizeof(float));
+                graphics::capture_structured_buffer(&particles_buffer_z, particles_z, active_particles, sizeof(float));
+                graphics::capture_structured_buffer(&particles_buffer_weights, particles_weights, active_particles, sizeof(float));
                 std::ofstream agents;
                 agents.open("export/agents.txt", std::ofstream::out | std::ofstream::app);
                 agents << "*** timestep " << timestep_counter << " [X Y Z D] ***" << std::endl;
                 agents.precision(7);
-                for (int i = data_count; i < int(NUM_PARTICLES); ++i) {
+                for (int i = data_count; i < active_particles; ++i) {
                     agents 
                         << measure_grid_to_world(particles_x[i], WORLD_SIZE_X, float(GRID_RESOLUTION_X)) << " "
                         << measure_grid_to_world(particles_y[i], WORLD_SIZE_Y, float(GRID_RESOLUTION_Y)) << " "
@@ -1322,7 +1333,7 @@ int main(int argc, char **argv)
                 graphics::set_structured_buffer(&particles_buffer_y, 3);
                 graphics::set_structured_buffer(&particles_buffer_z, 4);
                 graphics::set_structured_buffer(&particles_buffer_theta, 6);
-                int32_t grid_z = (NUM_PARTICLES / 100) / THREAD_GROUP_SIZE;
+                int32_t grid_z = ((active_agents + data_count) / 100) / THREAD_GROUP_SIZE;
                 graphics::run_compute(10, 10, grid_z);
                 graphics::unset_structured_buffer(0);
                 graphics::unset_structured_buffer(2);
@@ -1674,6 +1685,43 @@ int main(int argc, char **argv)
             reset_pt |= ui::add_slider(&panel, "PERSISTENCE", &simulation_config.decay_factor, 0.8, 0.995);
             // reset_pt |= ui::add_slider(&panel, "CENTER ATTRACTION", &simulation_config.center_attraction, 0.0, 10.0);
             reset_pt |= ui::add_slider(&panel, "SAMPLING EXP", &simulation_config.move_sense_coef, 0.0001, 10.0);
+
+            // Port QoL: runtime agent-count selection in 1M steps up to the
+            // config.polyp allocation (buffers stay at the max; only the
+            // dispatch range changes). Switching does a full F2-style reset:
+            // the trail field was deposited by the old population.
+            if (NUM_AGENTS >= 1000000) {
+                static int agent_option_count = 0;
+                static int32_t agent_option_agents[64];
+                static char agent_option_labels[64][12];
+                static const char *agent_option_ptrs[64];
+                if (agent_option_count == 0) {
+                    for (int m = 1; m <= NUM_AGENTS / 1000000 && agent_option_count < 63; ++m) {
+                        agent_option_agents[agent_option_count] = m * 1000000;
+                        snprintf(agent_option_labels[agent_option_count], sizeof(agent_option_labels[0]), "%dM", m);
+                        agent_option_ptrs[agent_option_count] = agent_option_labels[agent_option_count];
+                        ++agent_option_count;
+                    }
+                    if (NUM_AGENTS % 1000000 != 0) {   // odd config values keep their exact maximum
+                        agent_option_agents[agent_option_count] = NUM_AGENTS;
+                        snprintf(agent_option_labels[agent_option_count], sizeof(agent_option_labels[0]), "%.2fM", NUM_AGENTS / 1e6);
+                        agent_option_ptrs[agent_option_count] = agent_option_labels[agent_option_count];
+                        ++agent_option_count;
+                    }
+                }
+                static int agent_selected = -1;
+                if (agent_selected < 0) {
+                    agent_selected = agent_option_count - 1;
+                    for (int i = 0; i < agent_option_count; ++i)
+                        if (agent_option_agents[i] == active_agents) agent_selected = i;
+                }
+                if (ui::add_combo(&panel, "AGENT COUNT", &agent_selected, agent_option_ptrs, agent_option_count)) {
+                    active_agents = agent_option_agents[agent_selected];
+                    simulation_config.n_agents = active_agents;
+                    reset_particles_and_trails();
+                    reset_pt = true;
+                }
+            }
 
             float swgt = log(rendering_config.sample_weight) / log(10.0);
             reset_pt |= ui::add_slider(&panel, "TRACE WEIGHT", &swgt, -5.0, 3.0);

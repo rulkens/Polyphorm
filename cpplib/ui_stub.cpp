@@ -20,6 +20,7 @@ void end() {}
 bool add_toggle(Panel *, char *, bool *) { return false; }
 bool add_slider(Panel *, char *, float *, float, float) { return false; }
 void add_text(Panel *, const char *) {}
+bool add_combo(Panel *, char *, int *, const char *const [], int) { return false; }
 void release() {}
 void set_input_responsive(bool is_responsive) { g_input_responsive = is_responsive; }
 bool is_input_responsive() { return g_input_responsive; }

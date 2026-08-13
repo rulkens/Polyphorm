@@ -37,6 +37,8 @@ namespace ui
     bool add_slider(Panel *panel, char *label, float *pos, float min, float max);
     // Port addition: static text row inside the current panel.
     void add_text(Panel *panel, const char *text);
+    // Port addition: dropdown; returns true when the selection changes.
+    bool add_combo(Panel *panel, char *label, int *index, const char *const items[], int count);
 
     void release();
 

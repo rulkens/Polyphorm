@@ -175,6 +175,11 @@ void add_text(Panel *, const char *text) {
     ImGui::TextUnformatted(text);
 }
 
+bool add_combo(Panel *, char *label, int *index, const char *const items[], int count) {
+    ensure_frame_open();
+    return ImGui::Combo(label, index, items, count);
+}
+
 void release() {
     graphics::set_frame_end_hook(nullptr);   // defensive: no dangling callback into torn-down ImGui state
     ImGui_ImplWGPU_Shutdown();
