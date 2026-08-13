@@ -128,10 +128,10 @@ def main():
     ap.add_argument("--white", type=float, default=99.9,
                     help="percentile of kept values mapped to density 1.0 "
                          "(default 99.9)")
-    ap.add_argument("--scale", type=float, default=0.001,
+    ap.add_argument("--scale", type=float, default=0.01,
                     help="scene meters per Mpc — Blender reads the VDB "
-                         "transform in meters (default 0.001: 1 Mpc = 1 mm, "
-                         "so the SDSS box imports at ~0.6 m)")
+                         "transform in meters (default 0.01: 1 Mpc = 1 cm, "
+                         "so the SDSS box imports at ~5.6 x 9.4 x 5.7 m)")
     ap.add_argument("--tolerance", type=float, default=0.0,
                     help="values within this of 0 become inactive background "
                          "(default 0.0: prune exact zeros only)")
