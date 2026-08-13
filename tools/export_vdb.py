@@ -128,6 +128,10 @@ def main():
     ap.add_argument("--white", type=float, default=99.9,
                     help="percentile of kept values mapped to density 1.0 "
                          "(default 99.9)")
+    ap.add_argument("--scale", type=float, default=0.001,
+                    help="scene meters per Mpc — Blender reads the VDB "
+                         "transform in meters (default 0.001: 1 Mpc = 1 mm, "
+                         "so the SDSS box imports at ~0.6 m)")
     ap.add_argument("--tolerance", type=float, default=0.0,
                     help="values within this of 0 become inactive background "
                          "(default 0.0: prune exact zeros only)")
@@ -145,12 +149,16 @@ def main():
         sys.exit(f"error: {meta} not found — pass a Polyphorm export folder")
     res, size_mpc = parse_metadata(meta)
     voxel_sizes = [s / r for s, r in zip(size_mpc, res)]
-    voxel_size = sum(voxel_sizes) / 3.0
-    spread = (max(voxel_sizes) - min(voxel_sizes)) / voxel_size
+    voxel_mpc = sum(voxel_sizes) / 3.0
+    spread = (max(voxel_sizes) - min(voxel_sizes)) / voxel_mpc
     if spread > 0.01:
         print(f"warning: voxels are {spread * 100.0:.1f}% anisotropic "
-              f"({voxel_sizes}); using isotropic mean {voxel_size:.5f} Mpc")
-    print(f"grid {res[0]}x{res[1]}x{res[2]}, voxel {voxel_size:.5f} Mpc")
+              f"({voxel_sizes}); using isotropic mean {voxel_mpc:.5f} Mpc")
+    voxel_size = voxel_mpc * args.scale
+    print(f"grid {res[0]}x{res[1]}x{res[2]}, voxel {voxel_mpc:.5f} Mpc "
+          f"-> {voxel_size:.6g} scene meters (box "
+          f"{size_mpc[0] * args.scale:.3g} x {size_mpc[1] * args.scale:.3g} "
+          f"x {size_mpc[2] * args.scale:.3g} m)")
 
     fields = ("trace", "deposit") if args.field == "both" else (args.field,)
     grids = []
@@ -168,8 +176,8 @@ def main():
     out = args.output or (args.export_dir / "volume.vdb")
     vdb.write(str(out), grids=grids)
     print(f"wrote {out} ({out.stat().st_size / 1e6:.1f} MB)")
-    print("Blender: Add > Volume > Import OpenVDB (units are Mpc; scale "
-          "down if the scene clips)")
+    print("Blender: Add > Volume > Import OpenVDB; with the small scene "
+          "size, raise the Principled Volume density (try 500-5000)")
 
 
 if __name__ == "__main__":
