@@ -3,7 +3,9 @@
 From M4b (volume rendering + path tracing port), range 15389d1..HEAD.
 All 12 implementation tasks complete with per-task reviews. Final
 whole-branch review verdict: Ready with fixes (this commit lands those
-fixes). Human visual gate (Task 13) pending.
+fixes). Human visual gate (Task 13): PASSED 2026-08-13 — user confirmed
+("M4b visual gate passed") after running the GUI on the full 324,901-pt
+VAC catalog at the native 712x1200x728 grid. M4b fully closed.
 
 ## M5 must handle
 
