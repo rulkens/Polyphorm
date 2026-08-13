@@ -13,3 +13,6 @@
 /export_metadata.txt
 /halos_measurements.csv
 /agents.txt
+
+# Generated OpenVDB conversions
+/*.vdb

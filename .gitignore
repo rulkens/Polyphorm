@@ -3,3 +3,6 @@
 *.code-workspace
 build/
 /bin/imgui.ini
+
+# Python venv for offline tools (OpenVDB export)
+/.venv/
