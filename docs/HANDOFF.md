@@ -1,29 +1,33 @@
-# Polyphorm macOS port — handoff notes
+# macOS port: build and run notes
 
-This branch (`macos-webgpu-port`, tag `v1.0-macos-port`) is a native
-macOS port of Polyphorm: Direct3D 11 → WebGPU (Google Dawn, Metal
-backend), HLSL → WGSL, the custom UI → Dear ImGui. The port is
-quirk-preserving — simulation behavior was kept bit-faithful where
-possible rather than "improved" — and the result was validated against
-the published SDSS Cosmic Slime VAC: 3D log-trace Pearson **+0.964**
-(masked) / **+0.957** (unmasked) at d8 after 1000 iterations.
+The `macos-webgpu-port` branch (tagged `v1.0-macos-port`) is a native
+macOS port of Polyphorm. The renderer was moved from Direct3D 11 to
+WebGPU via Google Dawn on Metal, the shaders from HLSL to WGSL, and the
+UI to Dear ImGui. The port tries to preserve upstream behavior exactly,
+including some of its quirks, instead of fixing things along the way.
+The simulation output was validated against the published SDSS Cosmic
+Slime VAC and matches at a 3D log-trace Pearson correlation of +0.964
+(masked) / +0.957 (unmasked) at d8 after 1000 iterations.
 
-`docs/RUNNING.md` is the day-to-day reference (build, tests, GUI,
-headless export, Blender/OpenVDB, validation). This file is the
-fresh-machine path to a first successful run.
+This file gets you from a clean machine to a first run. See
+`docs/RUNNING.md` for the rest: headless runs, data export,
+Blender/OpenVDB, and the validation pipeline.
 
 ## Prerequisites
 
-- An Apple Silicon Mac. Tested on an M-series machine; the full VAC run
-  (10M agents, 1200 grid) peaks at ~7.8 GB RSS, so 16 GB RAM is enough.
-- Xcode Command Line Tools (`xcode-select --install`).
-- CMake ≥ 3.24 and git (`brew install cmake`).
-- Python 3 with numpy — only needed to pack datasets (see below).
-- Network access on the first CMake configure (dependency fetch).
+You need an Apple Silicon Mac. Development happened on an M-series
+machine; the heaviest run (10M agents on the 1200 grid) peaks at about
+7.8 GB RSS, so 16 GB of RAM is plenty.
 
-No depot_tools, no manual Dawn checkout: CMake FetchContent pulls Dawn
-(pinned to release tag `v20260807.193620`) and Dear ImGui (pinned
-commit, v1.92.9) and Dawn fetches its own dependencies, GLFW included.
+- Xcode Command Line Tools: `xcode-select --install`
+- CMake 3.24 or newer, plus git: `brew install cmake`
+- Python 3 with numpy, only needed for packing datasets
+- Network access during the first CMake configure
+
+There is no depot_tools setup and no manual Dawn checkout. CMake pulls
+Dawn (pinned to release tag `v20260807.193620`) and Dear ImGui (pinned
+to v1.92.9) through FetchContent, and Dawn fetches its own
+dependencies, GLFW included.
 
 ## Build
 
@@ -34,48 +38,49 @@ cmake -B build
 cmake --build build -j 8
 ```
 
-The first configure downloads Dawn and its dependencies (~10–20 min);
-the first build takes up to ~1 h and `build/` grows to ~1.4 GB. After
-that, builds are incremental and fast — don't wipe `build/`.
+The first configure downloads Dawn and its dependencies, which takes
+10-20 minutes. The first build takes up to an hour and leaves `build/`
+at about 1.4 GB. Everything after that is incremental, so avoid wiping
+`build/`.
 
-Sanity check:
+To check the result:
 
 ```sh
 cd build && ctest --output-on-failure
 ```
 
-Seven suites; all should be green. `energy_smoke` runs a real
-400-iteration headless simulation on a synthetic dataset, so its first
-post-build run is slower (cold Metal shader cache).
+All seven suites should pass. `energy_smoke` runs a real 400-iteration
+headless simulation on a synthetic dataset and is slower on its first
+run after a build because the Metal shader cache is cold.
 
 ## Datasets
 
-No data ships in the repo. The input format is unchanged from upstream
-Polyphorm: a `.bin` of float32 XYZW records plus the positional
-`_metadata.txt` (point count, extrema, mean weight).
+The repo contains no data. The input format is unchanged from upstream
+Polyphorm: a `.bin` of float32 XYZW records and the positional
+`_metadata.txt` with point count, extrema and mean weight.
 
-- **Existing upstream data drops in directly.** Place the 37.6k SDSS
-  viz slice you already distribute at
-  `bin/data/SDSS/galaxiesInSdssSlice_viz_bigger_lumdist_t=0.0.bin`
-  (+ its `_metadata.txt`).
-- **Any x,y,z,weight CSV** can be packed with the generic packer:
+The 37.6k SDSS viz slice you already distribute works as-is; put the
+`.bin` and `_metadata.txt` pair at
+`bin/data/SDSS/galaxiesInSdssSlice_viz_bigger_lumdist_t=0.0`.
 
-  ```sh
-  python3 tools/pack_catalog.py --csv path/to/catalog.csv --out bin/data/2MRS/2mrs_gui
-  ```
+Any other x,y,z,weight CSV can be packed with the generic packer:
 
-- **The full SDSS VAC catalog** (324,901 galaxies, the validation
-  input) is packed from PolyPhy's `sample_3D_linW.csv` with
-  `tools/pack_vac_catalog.py --csv <path>` — it hard-fails on point
-  count and unit mismatches, so a wrong input is unmistakable.
+```sh
+python3 tools/pack_catalog.py --csv path/to/catalog.csv --out bin/data/2MRS/2mrs_gui
+```
 
-`bin/config.polyp` is tracked and set to the validation configuration
-(10M agents, grid resolution 1200 → auto-fits the VAC to 712×1200×728).
-Compile-time MCPM constants in `main.cpp` are the SDSS VAC set (sense
-4.6, persistence 0.8, sharpness 2.5); the old SDSS-large set is
-preserved in comments beside them.
+The full SDSS VAC catalog (324,901 galaxies, the validation input) is
+packed from PolyPhy's `sample_3D_linW.csv` with
+`tools/pack_vac_catalog.py --csv <path>`. That script hard-fails on
+point count and unit mismatches.
 
-## Run
+`bin/config.polyp` is tracked and holds the validation configuration:
+10M agents, grid resolution 1200, which auto-fits the VAC catalog to
+712x1200x728. The compile-time MCPM constants in `main.cpp` are the
+SDSS VAC values (sense 4.6, persistence 0.8, sharpness 2.5); the old
+SDSS-large values are still there in comments next to them.
+
+## Running
 
 ```sh
 ./run_sdss.sh --quick   # 37k viz slice
@@ -83,33 +88,35 @@ preserved in comments beside them.
 ./run_2mrs.sh           # 2MRS, if packed
 ```
 
-The scripts start at 1M active agents for interactivity (the AGENT
-COUNT dropdown scales up to 10M; frame cost is roughly linear) and
-forward extra arguments to the binary. Direct invocation — the binary
-must run with `bin/` as working directory:
+The scripts start at 1M active agents to keep the frame rate reasonable
+(the AGENT COUNT dropdown goes up to 10M, and frame cost is roughly
+linear in agent count). Extra arguments are passed through to the
+binary. To invoke the binary directly, run it from `bin/`, since it
+reads `config.polyp` from the working directory:
 
 ```sh
 cd bin
 ../build/polyphorm --dataset data/SDSS/galaxiesInSdssSlice_viz_bigger_lumdist_t=0.0 --agents 1000000
 ```
 
-Controls are documented in-app in the **SHORTCUTS** panel (collapsed by
-default): F1 UI, F2 full reset, F3 pause, F6 export, F8 clear trace,
-left-drag orbit / right-drag pan / scroll zoom.
+Keyboard and mouse controls are listed in the SHORTCUTS panel inside
+the app (collapsed by default). The important ones: F1 toggles the UI,
+F2 does a full reset, F3 pauses, F6 exports, F8 clears the trace;
+left-drag orbits, right-drag pans, scroll zooms.
 
-Headless runs, the F6/`--export` data export, the Blender/OpenVDB
-converter, and the VAC validation pipeline are all covered in
-`docs/RUNNING.md`. Note the OpenVDB Python bindings have no macOS
-wheel; the build-from-source recipe is in the `tools/export_vdb.py`
-docstring.
+Headless mode, the F6/`--export` output format, the Blender/OpenVDB
+converter and the VAC comparison pipeline are documented in
+`docs/RUNNING.md`. One caveat there: the OpenVDB Python bindings have
+no macOS wheel, so they have to be built from source; the recipe is in
+the `tools/export_vdb.py` docstring.
 
-## Known gaps
+## Known issues
 
-- Performance: ~300 ms/frame at 10M agents on the native VAC grid.
-  Profiling and optimization (command-buffer batching, blit workgroup
-  reshape, f16 trace field) are the next planned work; turning off
-  TRACE HISTOGRAM helps immediately (it does a blocking readback per
-  frame).
-- F7 frame capture and the `1` HDR screenshot are warn-once stubs.
-- HUD/histogram overlay geometry anchors to the startup window size
-  (upstream behavior, preserved).
+- A frame currently takes about 300 ms at 10M agents on the native VAC
+  grid. Profiling and optimization are the next planned work (command
+  buffer batching, reshaping the blit workgroup, an f16 trace field).
+  Turning off TRACE HISTOGRAM helps right away, since it does a
+  blocking GPU readback every frame.
+- F7 frame capture and the `1` HDR screenshot are stubs that warn once.
+- The HUD and histogram overlays are anchored to the startup window
+  size. Upstream does the same; the port keeps it.
