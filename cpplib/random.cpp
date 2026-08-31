@@ -1,7 +1,7 @@
 #include "random.h"
-#include <stdlib.h>
+#include <cstdlib>
 
-float random::uniform(float low, float high)
+float rnd::uniform(float low, float high)
 {
 	double normalized = (rand() % 7919) / 7919.0;
 	double result = normalized * ((double)high - (double)low) + (double)low;
@@ -9,13 +9,13 @@ float random::uniform(float low, float high)
 	return (float)result;
 }
 
-Vector3 random::uniform_unit_hemisphere()
+Vector3 rnd::uniform_unit_hemisphere()
 {
-	float y = random::uniform(0.0f, 1.0f);
+	float y = rnd::uniform(0.0f, 1.0f);
 	float r = math::sqrt(1.0f - y * y);
-	float phi = random::uniform(0.0f, math::PI2);
+	float phi = rnd::uniform(0.0f, math::PI2);
 
-	float radius = random::uniform(0.0f, 1.0f);
+	float radius = rnd::uniform(0.0f, 1.0f);
 	radius = math::sqrt(radius);
 	
 	Vector3 result;

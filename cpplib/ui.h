@@ -25,6 +25,9 @@ namespace ui
     
     Panel start_panel(char *name, Vector2 pos, float width);
     Panel start_panel(char *name, float x, float y, float width);
+    // Port addition: same as start_panel, but the window starts collapsed
+    // (first launch only — ImGui persists the user's state in imgui.ini).
+    Panel start_panel_collapsed(char *name, Vector2 pos, float width);
     void end_panel(Panel *panel);
     Vector4 get_panel_rect(Panel *panel);
 
@@ -32,6 +35,10 @@ namespace ui
     
     bool add_toggle(Panel *panel, char *label, bool *state);
     bool add_slider(Panel *panel, char *label, float *pos, float min, float max);
+    // Port addition: static text row inside the current panel.
+    void add_text(Panel *panel, const char *text);
+    // Port addition: dropdown; returns true when the selection changes.
+    bool add_combo(Panel *panel, char *label, int *index, const char *const items[], int count);
 
     void release();
 

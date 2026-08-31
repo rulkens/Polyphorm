@@ -20,7 +20,7 @@ struct Font
     float row_height;
     float top_pad;
     float scale;
-    Texture2D texture;
+    graphics::Texture2D texture;
     FT_Face face;
 };
 

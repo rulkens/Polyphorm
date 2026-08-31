@@ -1,0 +1,67 @@
+
+-> input data points: 324901
+-> number of agents: 10000000
+-> simulation grid resolution: 712 x 1200 x 728
+-> simulation domain: 556.29 x 937.56 x 568.79 Mpc
+
+Initializing graphics...
+[gpu] limits: workgroup_invocations=1024 storage_binding=4095 MiB buffer=4095 MiB
+/Users/rulkens/Development/vendor/cpp/Polyphorm/shaders/cs_agents_propagate.wgsl compiled...
+/Users/rulkens/Development/vendor/cpp/Polyphorm/shaders/cs_field_decay.wgsl compiled...
+/Users/rulkens/Development/vendor/cpp/Polyphorm/shaders/cs_density_histo.wgsl compiled...
+/Users/rulkens/Development/vendor/cpp/Polyphorm/shaders/cs_particles_transform.wgsl compiled...
+/Users/rulkens/Development/vendor/cpp/Polyphorm/shaders/cs_particles_blit.wgsl compiled...
+/Users/rulkens/Development/vendor/cpp/Polyphorm/shaders/vs_2d.wgsl compiled...
+/Users/rulkens/Development/vendor/cpp/Polyphorm/shaders/ps_particles_color.wgsl compiled...
+/Users/rulkens/Development/vendor/cpp/Polyphorm/shaders/cs_volpath.wgsl compiled...
+/Users/rulkens/Development/vendor/cpp/Polyphorm/shaders/cs_volpath_blit.wgsl compiled...
+/Users/rulkens/Development/vendor/cpp/Polyphorm/shaders/vs_3d.wgsl compiled...
+/Users/rulkens/Development/vendor/cpp/Polyphorm/shaders/ps_volume_trace.wgsl compiled...
+/Users/rulkens/Development/vendor/cpp/Polyphorm/shaders/ps_volume_highlight.wgsl compiled...
+/Users/rulkens/Development/vendor/cpp/Polyphorm/shaders/ps_volume_overdensity.wgsl compiled...
+/Users/rulkens/Development/vendor/cpp/Polyphorm/shaders/ps_volpath.wgsl compiled...
+[headless] iteration 0  E = 0.554045
+[headless] iteration 50  E = 18.343040
+[headless] iteration 100  E = 41.428970
+[headless] iteration 150  E = 57.869358
+[headless] iteration 200  E = 68.920586
+[headless] iteration 250  E = 75.884224
+[headless] iteration 300  E = 80.350922
+[headless] iteration 350  E = 83.145721
+[headless] iteration 400  E = 85.066795
+[headless] iteration 450  E = 85.916634
+[headless] iteration 500  E = 86.693733
+[headless] iteration 550  E = 87.253883
+[headless] iteration 600  E = 87.314072
+[headless] iteration 650  E = 87.548141
+[headless] iteration 700  E = 87.771301
+[headless] iteration 750  E = 87.908875
+[headless] iteration 800  E = 87.953613
+[headless] iteration 850  E = 88.214058
+[headless] iteration 900  E = 87.842522
+[headless] iteration 950  E = 87.792007
+Exporting simulation data...
+Done exporting simulation data.
+[headless] iteration 1000  E = 87.791565
+[headless] E first=5.845970 last=87.791565 -> ENERGY RISING
+[gpu] device lost (2): Device was destroyed.
+
+
+      519.87 real       499.93 user         5.82 sys
+          7751417856  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+              969221  page reclaims
+                  10  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                3474  voluntary context switches
+              142196  involuntary context switches
+       8584385787828  instructions retired
+       1529479152092  cycles elapsed
+         16145465280  peak memory footprint

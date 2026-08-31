@@ -1,13 +1,13 @@
 #pragma once
-#include <Windows.h>
+struct GLFWwindow;
 #include <stdint.h>
 
-#define IS_WINDOW_VALID(window) (!(window.window_handle == INVALID_HANDLE_VALUE))
+#define IS_WINDOW_VALID(window) ((window).window_handle != nullptr)
 
 // Represents current window
 struct Window
 {
-	HWND window_handle;
+	GLFWwindow *window_handle;
 	uint32_t window_width;
 	uint32_t window_height;
 };
@@ -97,7 +97,7 @@ struct Event
 };
 
 // Ticks represent CPU ticks
-typedef LARGE_INTEGER Ticks;
+typedef uint64_t Ticks;  // nanoseconds; frequency fixed at 1e9
 
 // `platform` namespace handles interfacing with windows API, with the exception of file system interface
 namespace platform
@@ -108,6 +108,20 @@ namespace platform
 
 	// Check if window is valid
 	bool is_window_valid(Window *window);
+
+	// The single live GLFWwindow* platform:: owns (set by get_window). Needed
+	// by ui::init for ImGui_ImplGlfw_InitForOther (M4a design §4.1).
+	GLFWwindow *get_glfw_window();
+
+	// Poll the window's current logical size (points) and framebuffer size
+	// (pixels; 2x logical on Retina displays). GLFW updates both
+	// synchronously once events have been pumped (platform::get_event does
+	// that), so main.cpp can just call this once per frame and compare
+	// against its last-known size to detect a resize — no resize callback
+	// needed (M4a Task 2b: window resize support). No-op (all outputs 0) if
+	// the window is invalid.
+	void get_window_size(Window *window, uint32_t *out_logical_w, uint32_t *out_logical_h,
+	                     uint32_t *out_fb_w, uint32_t *out_fb_h);
 
 	// Get next Event, should be called per frame until false is returned
 	bool get_event(Event *event);

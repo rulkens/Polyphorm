@@ -1,0 +1,3 @@
+# Packed datasets are generated locally (tools/pack_catalog.py), never committed
+*.bin
+*_metadata.txt

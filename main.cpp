@@ -4,18 +4,22 @@
 #include "maths.h"
 #include "memory.h"
 #include "ui.h"
-#include "font.h"
 #include "input.h"
 #include "random.h"
 #include <cassert>
-#include <mmsystem.h>
 #include "logging.h"
+#include <cstddef>
+#include <cstring>
+#include <cstdlib>
+#include <ctime>
+#include <filesystem>
 #include <sstream>
 #include <fstream>
 
-//*** Truncation from double to float warning
-#pragma warning(disable:4305)
-#pragma warning(disable:4244)
+// Upstream (D3D11-era) main.cpp used these types unqualified; graphics.h now
+// namespaces them (M2a port). Rather than prefix every one of the ~150 call
+// sites below, pull the fork's graphics:: types/enums into scope here.
+using namespace graphics;
 
 //====================================================================
 
@@ -58,13 +62,25 @@
 // const float PERSISTENCE = 0.91;
 // const float SAMPLING_EXPONENT = 3.5;
 // SDSS large
+// const float SENSE_SPREAD = 20.0;
+// const float SENSE_DISTANCE = 3.51;
+// const float MOVE_ANGLE = 10.0;
+// const float MOVE_DISTANCE = 0.1;
+// const float AGENT_DEPOSIT = 0.0;
+// const float PERSISTENCE = 0.89;
+// const float SAMPLING_EXPONENT = 4.08;
+// SDSS VAC — published DR17 Cosmic Slime VAC parameters (its
+// export_metadata.txt: sense 4.6 mpc, persistence 0.8, sharpness 2.5;
+// move 0.1 / spreads 20,10 / deposit 0 already matched). M5 validation
+// protocol; a data edit in the file's own alternate-block idiom, not a
+// logic change (design §7.1).
 const float SENSE_SPREAD = 20.0;
-const float SENSE_DISTANCE = 3.51;
+const float SENSE_DISTANCE = 4.6;
 const float MOVE_ANGLE = 10.0;
 const float MOVE_DISTANCE = 0.1;
 const float AGENT_DEPOSIT = 0.0;
-const float PERSISTENCE = 0.89;
-const float SAMPLING_EXPONENT = 4.08;
+const float PERSISTENCE = 0.8;
+const float SAMPLING_EXPONENT = 2.5;
 #endif
 
 #ifdef REGIME_BOLSHOI_PLANCK
@@ -252,6 +268,11 @@ struct SimulationConfig {
     int n_iteration;
     int filler3;
 };
+static_assert(sizeof(SimulationConfig) == 64, "SimulationConfig must stay 16 4-byte scalars (WGSL uniform layout match)");
+static_assert(offsetof(SimulationConfig, deposit_value) == 16, "layout drift");
+static_assert(offsetof(SimulationConfig, world_height) == 32, "layout drift");
+static_assert(offsetof(SimulationConfig, n_data_points) == 48, "layout drift");
+static_assert(offsetof(SimulationConfig, filler3) == 60, "layout drift");
 
 struct RenderingConfig {
     Matrix4x4 projection;
@@ -303,6 +324,7 @@ struct RenderingConfig {
     float guiding_strength;
     float scattering_anisotropy;
 };
+static_assert(sizeof(RenderingConfig) == 3 * 64 + 36 * 4, "RenderingConfig layout");
 
 struct StatisticsConfig {
     int n_data_points;
@@ -315,6 +337,7 @@ struct StatisticsConfig {
     float world_depth;
     int filler3;
 };
+static_assert(sizeof(StatisticsConfig) == 32, "StatisticsConfig layout");
 
 float quad_vertices[] = {
     -1.0f, -1.0f, 0.0f, 1.0f,
@@ -337,6 +360,27 @@ uint32_t quad_vertices_count = 6;
 
 int main(int argc, char **argv)
 {
+    // M2b: --headless N runs N simulation iterations with no window/UI/rendering
+    // and exits 0 iff the trace-histogram mean energy at data points rose;
+    // --dataset <path> overrides the compiled-in DATASET_NAME (used by the
+    // energy_smoke ctest to point at a generated synthetic catalog).
+    int headless_frames = 0;   // 0 = windowed
+    const char *dataset_override = NULL;
+    // M5: --export arms F6's store_deposit on the final headless iteration —
+    // headless mode has no keyboard input, and the validation run must not
+    // launch the GUI. The quirk-preserved F6 block itself is untouched.
+    bool export_on_exit = false;
+    // --agents N starts with N active agents (clamped to the config.polyp
+    // maximum); the AGENT COUNT combo picks this up and can change it later.
+    int32_t agents_override = 0;
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--headless") == 0 && i + 1 < argc) headless_frames = atoi(argv[i + 1]);
+        if (strcmp(argv[i], "--dataset") == 0 && i + 1 < argc) dataset_override = argv[i + 1];
+        if (strcmp(argv[i], "--export") == 0) export_on_exit = true;
+        if (strcmp(argv[i], "--agents") == 0 && i + 1 < argc) agents_override = atoi(argv[i + 1]);
+    }
+    const bool headless = headless_frames > 0;
+
     // Load configuration file
     std::ifstream config_file;
     config_file.open("config.polyp", std::ofstream::in);
@@ -359,12 +403,15 @@ int main(int argc, char **argv)
 
     // Window setup
     uint32_t window_width = SCREEN_X, window_height = SCREEN_Y;
- 	Window window = platform::get_window("Space Physarum", window_width, window_height);
-    assert(platform::is_window_valid(&window));
+    Window window = {};
+    if (!headless) {
+        window = platform::get_window("Space Physarum", window_width, window_height);
+        assert(platform::is_window_valid(&window));
+    }
 
     // Data setup
         // Load dataset description from metafile
-    std::string filename(DATASET_NAME);
+    std::string filename(dataset_override ? dataset_override : DATASET_NAME);
     std::ifstream metadata_file;
     metadata_file.open((filename + "_metadata.txt").c_str(), std::ofstream::in);
     if (!metadata_file.good()) {
@@ -390,6 +437,16 @@ int main(int argc, char **argv)
     printf("\n-> input data points: %d\n", data_count);
     printf("-> number of agents: %d\n", NUM_AGENTS);
     int32_t NUM_PARTICLES = NUM_AGENTS + data_count;
+    // Port QoL: agent count selected at runtime via the AGENT COUNT combo.
+    // Buffers stay allocated for the full NUM_AGENTS (the config.polyp
+    // value = the selectable maximum); dispatches cover only
+    // active_agents + data_count particles. Headless runs never touch the
+    // UI, so active_agents == NUM_AGENTS there (validation unaffected).
+    int32_t active_agents = NUM_AGENTS;
+    if (agents_override > 0) {
+        active_agents = agents_override < NUM_AGENTS ? agents_override : NUM_AGENTS;
+        printf("-> active agents (--agents): %d\n", active_agents);
+    }
 
     // World and grid setup
         // Set world size to encapsulate data
@@ -436,154 +493,102 @@ int main(int argc, char **argv)
     // Init graphics
     printf("\nInitializing graphics...\n");
     graphics::init();
-    graphics::init_swap_chain(&window);
+    RenderTarget render_target_window = {};
+    DepthBuffer depth_buffer = {};
+    if (!headless) {
+        graphics::init_swap_chain(&window);
 
-    font::init();
-    ui::init((float)window_width, (float)window_height);
-    ui::set_input_responsive(true);
+        // M4: font::init returns with ImGui
+        ui::init((float)window_width, (float)window_height);
+        ui::set_input_responsive(true);
 
-    // Create window render target
-	RenderTarget render_target_window = graphics::get_render_target_window();
-    assert(graphics::is_ready(&render_target_window));
-    DepthBuffer depth_buffer = graphics::get_depth_buffer(window_width, window_height);
-    assert(graphics::is_ready(&depth_buffer));
-    graphics::set_render_targets_viewport(&render_target_window, &depth_buffer);
+        // Create window render target
+        render_target_window = graphics::get_render_target_window();
+        assert(graphics::is_ready(&render_target_window));
+        depth_buffer = graphics::get_depth_buffer(window_width, window_height);
+        assert(graphics::is_ready(&depth_buffer));
+        graphics::set_render_targets_viewport(&render_target_window);
+    }
 
-    // Rendering shader for rendering individual particles
-    File draw_compute_shader_file_particle = file_system::read_file("cs_particles_transform.hlsl");
-    ComputeShader draw_compute_shader_particle = graphics::get_compute_shader_from_code((char *)draw_compute_shader_file_particle.data, draw_compute_shader_file_particle.size);
-    file_system::release_file(draw_compute_shader_file_particle);
-    assert(graphics::is_ready(&draw_compute_shader_particle));
-    printf("cs_particles_transform shader compiled...\n");
+    // M2b: only the simulation kernels are ported to WGSL. Render-path
+    // shaders return in M3 (particles) and M4 (volume/PT).
+    auto load_compute = [](const char *path) {
+        File f = file_system::read_file(path);
+        if (!f.data) { logging::print_error("shader file missing: %s", path); assert(false); }
+        ComputeShader cs = graphics::get_compute_shader_from_code((char *)f.data, f.size);
+        file_system::release_file(f);
+        assert(graphics::is_ready(&cs));
+        printf("%s compiled...\n", path);
+        return cs;
+    };
+    ComputeShader compute_shader = load_compute(SHADER_ROOT "/cs_agents_propagate.wgsl");
+    ComputeShader decay_compute_shader = load_compute(SHADER_ROOT "/cs_field_decay.wgsl");
+    ComputeShader cs_density_histo = load_compute(SHADER_ROOT "/cs_density_histo.wgsl");
+    ComputeShader draw_compute_shader_particle = load_compute(SHADER_ROOT "/cs_particles_transform.wgsl");
+    ComputeShader blit_compute_shader = load_compute(SHADER_ROOT "/cs_particles_blit.wgsl");
 
-    // Shader for blitting from uint to float texture.
-    File blit_compute_shader_file = file_system::read_file("cs_particles_blit.hlsl");
-    ComputeShader blit_compute_shader = graphics::get_compute_shader_from_code((char *)blit_compute_shader_file.data, blit_compute_shader_file.size);
-    file_system::release_file(blit_compute_shader_file);
-    assert(graphics::is_ready(&blit_compute_shader));
-    printf("cs_particles_blit shader compiled...\n");
+    auto load_vs = [](const char *path) {
+        File f = file_system::read_file(path);
+        if (!f.data) { logging::print_error("shader file missing: %s", path); assert(false); }
+        VertexShader vs = graphics::get_vertex_shader_from_code((char *)f.data, f.size);
+        file_system::release_file(f);
+        assert(graphics::is_ready(&vs));
+        printf("%s compiled...\n", path);
+        return vs;
+    };
+    auto load_ps = [](const char *path) {
+        File f = file_system::read_file(path);
+        if (!f.data) { logging::print_error("shader file missing: %s", path); assert(false); }
+        PixelShader ps = graphics::get_pixel_shader_from_code((char *)f.data, f.size);
+        file_system::release_file(f);
+        assert(graphics::is_ready(&ps));
+        printf("%s compiled...\n", path);
+        return ps;
+    };
+    VertexShader vertex_shader_2d = load_vs(SHADER_ROOT "/vs_2d.wgsl");
+    PixelShader pixel_shader_2d = load_ps(SHADER_ROOT "/ps_particles_color.wgsl");
 
-    // Vertex shader
-    File vertex_shader_file = file_system::read_file("vs_3d.hlsl"); 
-    VertexShader vertex_shader = graphics::get_vertex_shader_from_code((char *)vertex_shader_file.data, vertex_shader_file.size);
-    file_system::release_file(vertex_shader_file);
-    assert(graphics::is_ready(&vertex_shader));
-    printf("vs_3d shader compiled...\n");
-
-    // Pixel shader
-    File pixel_shader_file = file_system::read_file("ps_volume_trace.hlsl"); 
-    PixelShader pixel_shader = graphics::get_pixel_shader_from_code((char *)pixel_shader_file.data, pixel_shader_file.size);
-    file_system::release_file(pixel_shader_file);
-    assert(graphics::is_ready(&pixel_shader));
-    printf("ps_volume_trace shader compiled...\n");
-
-    // Volume shader for highlighting AOIs
-    File ps_volume_highlight_file = file_system::read_file("ps_volume_highlight.hlsl"); 
-    PixelShader ps_volume_highlight = graphics::get_pixel_shader_from_code((char *)ps_volume_highlight_file.data, ps_volume_highlight_file.size);
-    file_system::release_file(ps_volume_highlight_file);
-    assert(graphics::is_ready(&ps_volume_highlight));
-    printf("ps_volume_highlight shader compiled...\n");
-
-    // Volume shader for highlighting AOIs
-    File ps_volume_halocolor_file = file_system::read_file("ps_volume_halocolor.hlsl"); 
-    PixelShader ps_volume_halocolor = graphics::get_pixel_shader_from_code((char *)ps_volume_halocolor_file.data, ps_volume_halocolor_file.size);
-    file_system::release_file(ps_volume_halocolor_file);
-    assert(graphics::is_ready(&ps_volume_halocolor));
-    printf("ps_volume_halocolor shader compiled...\n");
-
-    // Volume shader for segmenting overdensities
-    File ps_volume_overdensity_file = file_system::read_file("ps_volume_overdensity.hlsl"); 
-    PixelShader ps_volume_overdensity = graphics::get_pixel_shader_from_code((char *)ps_volume_overdensity_file.data, ps_volume_overdensity_file.size);
-    file_system::release_file(ps_volume_overdensity_file);
-    assert(graphics::is_ready(&ps_volume_overdensity));
-    printf("ps_volume_overdensity shader compiled...\n");
-
-    // Volume shader for visualizing filament directionality/velocity
-    File ps_volume_velocity_file = file_system::read_file("ps_volume_velocity.hlsl"); 
-    PixelShader ps_volume_velocity = graphics::get_pixel_shader_from_code((char *)ps_volume_velocity_file.data, ps_volume_velocity_file.size);
-    file_system::release_file(ps_volume_velocity_file);
-    assert(graphics::is_ready(&ps_volume_velocity));
-    printf("ps_volume_velocity shader compiled...\n");
-
-    // Particle system shader
-    File compute_shader_file = file_system::read_file("cs_agents_propagate.hlsl");
-    ComputeShader compute_shader = graphics::get_compute_shader_from_code((char *)compute_shader_file.data, compute_shader_file.size);
-    file_system::release_file(compute_shader_file);
-    assert(graphics::is_ready(&compute_shader));
-    printf("cs_agents_propagate shader compiled...\n");
-
-    // Particle sorting shader
-    File sort_shader_file = file_system::read_file("cs_agents_sort.hlsl");
-    ComputeShader sort_shader = graphics::get_compute_shader_from_code((char *)sort_shader_file.data, sort_shader_file.size);
-    file_system::release_file(sort_shader_file);
-    assert(graphics::is_ready(&sort_shader));
-    printf("cs_agents_sort shader compiled...\n");
-
-    // Decay/diffusion shader
-    File decay_compute_shader_file = file_system::read_file("cs_field_decay.hlsl");
-    ComputeShader decay_compute_shader = graphics::get_compute_shader_from_code((char *)decay_compute_shader_file.data, decay_compute_shader_file.size);
-    file_system::release_file(decay_compute_shader_file);
-    assert(graphics::is_ready(&decay_compute_shader));
-    printf("cs_field_decay shader compiled...\n");
-
-    // Vertex shader for displaying textures.
-    vertex_shader_file = file_system::read_file("vs_2d.hlsl"); 
-    VertexShader vertex_shader_2d = graphics::get_vertex_shader_from_code((char *)vertex_shader_file.data, vertex_shader_file.size);
-    file_system::release_file(vertex_shader_file);
-    assert(graphics::is_ready(&vertex_shader_2d));
-    printf("vs_2d shader compiled...\n");
-
-    // Pixel shader for displaying textures.
-    pixel_shader_file = file_system::read_file("ps_particles_color.hlsl"); 
-    PixelShader pixel_shader_2d = graphics::get_pixel_shader_from_code((char *)pixel_shader_file.data, pixel_shader_file.size);
-    file_system::release_file(pixel_shader_file);
-    assert(graphics::is_ready(&pixel_shader_2d));
-    printf("ps_particles_color shader compiled...\n");
-
-    // Particle density histogram shader
-    File file_cs_density_histo = file_system::read_file("cs_density_histo.hlsl");
-    ComputeShader cs_density_histo = graphics::get_compute_shader_from_code((char *)file_cs_density_histo.data, file_cs_density_histo.size);
-    file_system::release_file(file_cs_density_histo);
-    assert(graphics::is_ready(&cs_density_histo));
-    printf("cs_density_histo shader compiled...\n");
-
-    // Volumetric path tracer
-    File file_cs_volpath = file_system::read_file("cs_volpath.hlsl");
-    ComputeShader cs_volpath = graphics::get_compute_shader_from_code((char *)file_cs_volpath.data, file_cs_volpath.size);
-    file_system::release_file(file_cs_volpath);
-    assert(graphics::is_ready(&cs_volpath));
-    printf("cs_volpath shader compiled...\n");
-
-    File file_ps_volpath = file_system::read_file("ps_volpath.hlsl");
-    PixelShader ps_volpath = graphics::get_pixel_shader_from_code((char *)file_ps_volpath.data, file_ps_volpath.size);
-    file_system::release_file(file_ps_volpath);
-    assert(graphics::is_ready(&ps_volpath));
-    printf("ps_volpath shader compiled...\n");
+    // M3: cs_agents_sort (upstream default-off)
+    // M4b: only sort_shader (upstream default-off) and the two file-parity
+    // PS ports (ps_volume_halocolor, ps_volume_velocity) remain unwired.
+    ComputeShader sort_shader = {};
+    ComputeShader cs_volpath = load_compute(SHADER_ROOT "/cs_volpath.wgsl");
+    ComputeShader cs_volpath_blit = load_compute(SHADER_ROOT "/cs_volpath_blit.wgsl");
+    VertexShader vertex_shader = load_vs(SHADER_ROOT "/vs_3d.wgsl");
+    PixelShader pixel_shader = load_ps(SHADER_ROOT "/ps_volume_trace.wgsl"),
+                ps_volume_highlight = load_ps(SHADER_ROOT "/ps_volume_highlight.wgsl"),
+                ps_volume_halocolor = {},
+                ps_volume_overdensity = load_ps(SHADER_ROOT "/ps_volume_overdensity.wgsl"),
+                ps_volume_velocity = {}, ps_volpath = load_ps(SHADER_ROOT "/ps_volpath.wgsl");
 
     // Textures for the simulation
     #ifdef HALO_COLOR_ANALYSIS
-    Texture3D trail_tex_A = graphics::get_texture3D(NULL, GRID_RESOLUTION_X, GRID_RESOLUTION_Y, GRID_RESOLUTION_Z, DXGI_FORMAT_R16G16_FLOAT, 4);
-    Texture3D trail_tex_B = graphics::get_texture3D(NULL, GRID_RESOLUTION_X, GRID_RESOLUTION_Y, GRID_RESOLUTION_Z, DXGI_FORMAT_R16G16_FLOAT, 4);
+    // M-later: widen format for this analysis mode
+    Texture3D trail_tex_A = graphics::get_texture3D(NULL, GRID_RESOLUTION_X, GRID_RESOLUTION_Y, GRID_RESOLUTION_Z, graphics::Format::R32_FLOAT, 4);
+    Texture3D trail_tex_B = graphics::get_texture3D(NULL, GRID_RESOLUTION_X, GRID_RESOLUTION_Y, GRID_RESOLUTION_Z, graphics::Format::R32_FLOAT, 4);
     #else
-    Texture3D trail_tex_A = graphics::get_texture3D(NULL, GRID_RESOLUTION_X, GRID_RESOLUTION_Y, GRID_RESOLUTION_Z, DXGI_FORMAT_R16_FLOAT, 2);
-    Texture3D trail_tex_B = graphics::get_texture3D(NULL, GRID_RESOLUTION_X, GRID_RESOLUTION_Y, GRID_RESOLUTION_Z, DXGI_FORMAT_R16_FLOAT, 2);
+    // QUIRK(r16f_channel_truncation): upstream R16_FLOAT single-channel; r32float is the exact-match WebGPU storage format (translation-notes §0). VAC scale: ~2.5 GB each.
+    Texture3D trail_tex_A = graphics::get_texture3D(NULL, GRID_RESOLUTION_X, GRID_RESOLUTION_Y, GRID_RESOLUTION_Z, graphics::Format::R32_FLOAT, 4);
+    Texture3D trail_tex_B = graphics::get_texture3D(NULL, GRID_RESOLUTION_X, GRID_RESOLUTION_Y, GRID_RESOLUTION_Z, graphics::Format::R32_FLOAT, 4);
     #endif
     #ifdef VELOCITY_ANALYSIS
-    Texture3D trace_tex = graphics::get_texture3D(NULL, GRID_RESOLUTION_X, GRID_RESOLUTION_Y, GRID_RESOLUTION_Z, DXGI_FORMAT_R16G16B16A16_FLOAT, 8);
+    // M-later: widen format for this analysis mode
+    Texture3D trace_tex = graphics::get_texture3D(NULL, GRID_RESOLUTION_X, GRID_RESOLUTION_Y, GRID_RESOLUTION_Z, graphics::Format::R32_FLOAT, 8);
     #else
-    Texture3D trace_tex = graphics::get_texture3D(NULL, GRID_RESOLUTION_X, GRID_RESOLUTION_Y, GRID_RESOLUTION_Z, DXGI_FORMAT_R16_FLOAT, 2);
+    // QUIRK(r16f_channel_truncation): upstream R16_FLOAT single-channel; r32float is the exact-match WebGPU storage format (translation-notes §0). VAC scale: ~2.5 GB each.
+    Texture3D trace_tex  = graphics::get_texture3D(NULL, GRID_RESOLUTION_X, GRID_RESOLUTION_Y, GRID_RESOLUTION_Z, graphics::Format::R32_FLOAT, 4);
     #endif
-    Texture2D display_tex = graphics::get_texture2D(NULL, window_width, window_height, DXGI_FORMAT_R32G32B32A32_FLOAT, 16);
-    Texture2D display_tex_uint = graphics::get_texture2D(NULL, window_width, window_height, DXGI_FORMAT_R32_UINT, 4);
-    Texture2D palette_trace_tex = graphics::load_texture2D(COLOR_PALETTE_TRACE);
-    Texture2D palette_data_tex = graphics::load_texture2D(COLOR_PALETTE_DATA);
+    Texture2D display_tex = graphics::get_texture2D(NULL, window_width, window_height, graphics::Format::RGBA32_FLOAT, 16);      // M3: framebuffer-vs-logical decision
+    // DATA_ROOT mirrors SHADER_ROOT's absolute-path fix — the M3 gate recipe runs from /tmp/polyviz with no data/ subdir (design §4)
+    Texture2D palette_trace_tex = graphics::load_texture2D(DATA_ROOT "/" COLOR_PALETTE_TRACE);
+    Texture2D palette_data_tex = graphics::load_texture2D(DATA_ROOT "/" COLOR_PALETTE_DATA);
 
-    TextureSampler tex_sampler_trace = graphics::get_texture_sampler(CLAMP, D3D11_FILTER_ANISOTROPIC);
-    TextureSampler tex_sampler_deposit = graphics::get_texture_sampler(CLAMP, D3D11_FILTER_ANISOTROPIC);
+    TextureSampler tex_sampler_trace = graphics::get_texture_sampler(graphics::CLAMP, graphics::Filter::ANISOTROPIC);
+    TextureSampler tex_sampler_deposit = graphics::get_texture_sampler(graphics::CLAMP, graphics::Filter::ANISOTROPIC);
     TextureSampler tex_sampler_display = graphics::get_texture_sampler();
     TextureSampler tex_sampler_color_palette = graphics::get_texture_sampler();
-    
-	graphics::set_blend_state(BlendType::ALPHA);
+
+	graphics::set_blend_state(graphics::BlendType::ALPHA);
 
     // Particles setup
     float *particles_x = memory::alloc_heap<float>(NUM_PARTICLES);
@@ -642,22 +647,22 @@ int main(int argc, char **argv)
             // These are free-flowing physarum agents
             else {
                 #ifdef AGENTS_INIT_AROUND_DATA // Initialize the agents around data points to speed up convergence
-                int random_data_index = (int)random::uniform(0.0, (float)(data_count-1));
+                int random_data_index = (int)rnd::uniform(0.0, (float)(data_count-1));
                 const float random_spread = 0.025;
-                float radius = random_spread * math::min(math::min(gx, gy), gz) * random::uniform();
-                float xi1 = random::uniform();
-                float xi2 = random::uniform();
+                float radius = random_spread * math::min(math::min(gx, gy), gz) * rnd::uniform();
+                float xi1 = rnd::uniform();
+                float xi2 = rnd::uniform();
                 px[i] = px[random_data_index] + radius * math::cos(math::PI2 * xi1) * math::sqrt(xi2 * (1.0-xi2));
                 py[i] = py[random_data_index] + radius * math::sin(math::PI2 * xi1) * math::sqrt(xi2 * (1.0-xi2));
                 pz[i] = pz[random_data_index] + 0.5 * radius * (1.0 - 2.0*xi2);
                 #endif
                 #ifdef AGENTS_INIT_RANDOMLY
-                px[i] = random::uniform(0.0, (float)gx);
-                py[i] = random::uniform(0.0, (float)gy);
-                pz[i] = random::uniform(0.0, (float)gz);
+                px[i] = rnd::uniform(0.0, (float)gx);
+                py[i] = rnd::uniform(0.0, (float)gy);
+                pz[i] = rnd::uniform(0.0, (float)gz);
                 #endif
-                pp[i] = random::uniform(0.0, math::PI2);
-                pt[i] = math::acos(2.0 * random::uniform(0.0, 1.0) - 1.0);
+                pp[i] = rnd::uniform(0.0, math::PI2);
+                pt[i] = math::acos(2.0 * rnd::uniform(0.0, 1.0) - 1.0);
                 pw[i] = 1.0;
             }
 
@@ -683,6 +688,16 @@ int main(int argc, char **argv)
     graphics::update_structured_buffer(&density_histogram_buffer, density_histogram);
     StructuredBuffer halos_densities_buffer = graphics::get_structured_buffer(sizeof(float), data_count);
     graphics::update_structured_buffer(&halos_densities_buffer, halos_densities);
+
+    // Particle splat accumulation (replaces upstream's R32_UINT UAV texture:
+    // WGSL has no atomic storage textures — atomic<u32> buffer, row-major
+    // y*width+x. See docs/superpowers/research/m3/wgsl-drafts/translation-notes.md §0.1.
+    StructuredBuffer display_accum_buffer = graphics::get_structured_buffer(sizeof(uint32_t), window_width * window_height);
+
+    // PT accumulator: vec4<f32> per pixel. Replaces the D3D11 RWTexture2D<float4>
+    // read-modify-write on display_tex, which WGSL storage textures can't express
+    // (read_write is r32*-only) — design §2.6 option (a), M3 buffer+blit precedent.
+    StructuredBuffer pt_accum_buffer = graphics::get_structured_buffer(4 * sizeof(float), window_width * window_height);
 
     // Set up 3D texture quad mesh.
     float super_quad_vertices_template[] = {
@@ -785,7 +800,7 @@ int main(int argc, char **argv)
     rendering_config.scattering_anisotropy = 0.9;
     ConstantBuffer rendering_settings_buffer = graphics::get_constant_buffer(sizeof(RenderingConfig));
     graphics::update_constant_buffer(&rendering_settings_buffer, &rendering_config);
-    graphics::set_constant_buffer(&rendering_settings_buffer, 4);
+    // M3/M4: rendering config is bound per-dispatch at slot 0 (fork convention; upstream D3D11 bound it persistently at b4 — see docs/superpowers/research/m2/m2a-carryovers.md I3)
 
     // Assign default simulation parameters
     SimulationConfig simulation_config = {};
@@ -802,7 +817,7 @@ int main(int argc, char **argv)
     simulation_config.move_sense_coef = SAMPLING_EXPONENT;
     simulation_config.normalization_factor = 1.0;
     simulation_config.n_data_points = data_count;
-    simulation_config.n_agents = NUM_AGENTS;
+    simulation_config.n_agents = active_agents;
     simulation_config.n_iteration = 0;
     ConstantBuffer config_buffer = graphics::get_constant_buffer(sizeof(SimulationConfig));
 
@@ -828,6 +843,24 @@ int main(int argc, char **argv)
     };
     reset_eplot();
 
+    // Full particles+trails reset — shared by the F2 key and the AGENT
+    // COUNT combo (body unchanged from the upstream F2 handler).
+    auto reset_particles_and_trails = [&]() {
+        update_particles(particles_x, particles_y, particles_z, particles_phi, particles_theta, particles_weights,
+                        NUM_PARTICLES, GRID_RESOLUTION_X, GRID_RESOLUTION_Y, GRID_RESOLUTION_Z, WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z, WORLD_CENTER_X, WORLD_CENTER_Y, WORLD_CENTER_Z, mean_weight);
+        graphics::update_structured_buffer(&particles_buffer_x, particles_x);
+        graphics::update_structured_buffer(&particles_buffer_y, particles_y);
+        graphics::update_structured_buffer(&particles_buffer_z, particles_z);
+        graphics::update_structured_buffer(&particles_buffer_phi, particles_phi);
+        graphics::update_structured_buffer(&particles_buffer_theta, particles_theta);
+        graphics::update_structured_buffer(&particles_buffer_weights, particles_weights);
+        graphics::clear_texture(&trail_tex_A, 0.0f);
+        graphics::clear_texture(&trail_tex_B, 0.0f);
+        graphics::clear_texture(&trace_tex, 0.0f);
+        reset_eplot();
+        simulation_config.n_iteration = 0;
+    };
+
     // Render loop
     bool is_running = true;
     bool is_a = true;
@@ -839,17 +872,32 @@ int main(int argc, char **argv)
     bool capture_screen = false;
     bool make_screenshot = false;
     bool capture_agents = false;
-    bool compute_histogram = true;
+    bool compute_histogram = true;   // headless energy verdict (below) requires this to stay on.
+    if (headless) assert(compute_histogram);
     bool run_pt = true;
     bool reset_pt = false;
     bool sort_agents = false;
     float background_color = 0.0;
     VisualizationMode vis_mode = VisualizationMode::VM_PARTICLES;
+    // M4a Task 2b: true for any frame where the window's current framebuffer
+    // or logical size has a zero dimension (minimized/degenerate window).
+    // Set fresh each frame from platform::get_window_size below; the
+    // screen-sized resources (depth_buffer/display_tex/display_accum_buffer)
+    // are deliberately NOT torn down in this case — they keep their
+    // last-valid size, ready to resume the moment the window becomes visible
+    // again. Rendering itself is skipped for the frame (guards below).
+    bool window_minimized = false;
+
+    // Headless acceptance: mean trace energy at data points must rise (read after the loop).
+    float e_first = -1.0f;
+    float e_last = 0.0f;
 
     while(is_running)
     {
         static float sec_per_frame_amortized = 0.0;
         sec_per_frame_amortized = 0.9 * sec_per_frame_amortized + 0.1 * timer::checkpoint(&timer);
+
+      if (!headless) {
         std::ostringstream window_title;
         window_title.precision(3);
         window_title << "Polyphorm [ " << 1000.0 * sec_per_frame_amortized << " ms/frame";
@@ -858,7 +906,7 @@ int main(int argc, char **argv)
             window_title << " | " << rendering_config.pt_iteration << " spp";
         window_title << " ]";
         platform::set_window_title(window, window_title.str().c_str());
-        
+
         // Event loop
         input::reset();
         Event event;
@@ -871,9 +919,97 @@ int main(int argc, char **argv)
             }
         }
 
+        // Resize handling (M4a Task 2b, user-requested deviation from
+        // upstream's fixed-size window). Option A split (research notes):
+        // sim-facing screen resources (depth_buffer/display_tex/
+        // display_accum_buffer/rendering_config.screen_width/height) track
+        // LOGICAL window size; the surface/swapchain tracks FRAMEBUFFER
+        // (Retina 2x) size. Polled once per frame — platform::get_event
+        // above already pumped GLFW's event queue, so glfwGetWindowSize/
+        // glfwGetFramebufferSize are current. This is the top-of-frame safe
+        // point: no command encoder is open yet (the previous frame's
+        // swap_frames() already flushed it) and no set_*/run_* calls have
+        // happened yet this frame.
+        {
+            uint32_t new_logical_w, new_logical_h, new_fb_w, new_fb_h;
+            platform::get_window_size(&window, &new_logical_w, &new_logical_h, &new_fb_w, &new_fb_h);
+            window_minimized = (new_logical_w == 0 || new_logical_h == 0 ||
+                                new_fb_w == 0 || new_fb_h == 0);
+
+            if (!window_minimized &&
+                (new_logical_w != window_width || new_logical_h != window_height)) {
+                graphics::resize_surface(new_fb_w, new_fb_h);
+
+                window_width = new_logical_w;
+                window_height = new_logical_h;
+
+                graphics::release(&depth_buffer);
+                depth_buffer = graphics::get_depth_buffer(window_width, window_height);
+                assert(graphics::is_ready(&depth_buffer));
+
+                graphics::release(&display_tex);
+                display_tex = graphics::get_texture2D(NULL, window_width, window_height, graphics::Format::RGBA32_FLOAT, 16);
+                assert(graphics::is_ready(&display_tex));
+
+                graphics::release(&display_accum_buffer);
+                display_accum_buffer = graphics::get_structured_buffer(sizeof(uint32_t), window_width * window_height);
+                assert(graphics::is_ready(&display_accum_buffer));
+
+                graphics::release(&pt_accum_buffer);
+                pt_accum_buffer = graphics::get_structured_buffer(sizeof(float) * 4, window_width * window_height);
+                assert(graphics::is_ready(&pt_accum_buffer));
+
+                // m4a-carryovers #1: resize during PT accumulation recreates the accumulator
+                // while pt_iteration stays nonzero — restart accumulation instead of
+                // averaging against a fresh (zeroed) buffer at a stale iteration count.
+                reset_pt = true;
+
+                aspect_ratio = float(window_width) / float(window_height);
+                if (CAMERA_FOV > 0.0)
+                    rendering_config.projection = math::get_perspective_projection_dx_rh(math::deg2rad(CAMERA_FOV), aspect_ratio, 0.01, 10.0);
+                else
+                    rendering_config.projection = math::get_orthographics_projection_dx_rh(-1.4 * aspect_ratio, 1.4 * aspect_ratio, -1.4, 1.4, 0.01, 10.0);
+                rendering_config.screen_width = (float)window_width;
+                rendering_config.screen_height = (float)window_height;
+                graphics::update_constant_buffer(&rendering_settings_buffer, &rendering_config);
+
+                // ui:: is NOT notified: imgui_impl_glfw tracks the GLFW
+                // window's display size itself every ImGui_ImplGlfw_NewFrame()
+                // call (ui.cpp's ensure_frame_open) — re-running ui::init
+                // here would double-init ImGui (cpplib/ui.h stays
+                // byte-unchanged; no such re-init hook exists anyway).
+                //
+                // render_target_window is NOT recreated: its width/height
+                // fields are dead metadata (graphics.cpp's window_view()
+                // always re-acquires the live surface texture at whatever
+                // size the surface was just Configure'd to above — grep
+                // confirms no reader of RenderTarget::width/height for the
+                // is_window==true case).
+            }
+        }
+
         // React to inputs
         {
-            if(!ui::is_registering_input()) {
+            // window_minimized guard (M4a Task 2b fix round 1, reviewer
+            // finding): ui::is_registering_input() is itself a ui:: touch --
+            // it unconditionally calls ensure_frame_open() (ui.cpp), exactly
+            // like start_panel/draw_rect/draw_text. Calling it during a
+            // minimized frame would open an ImGui frame that would then get
+            // Render()'d and Present()'d against a window surface that was
+            // never re-Configure'd this frame (graphics::resize_surface
+            // skips Configure at 0x0 -- see its comment). Skipping the call
+            // entirely while minimized is the root-cause fix: it keeps
+            // ui.cpp's g_frame_open false for the whole frame, so that
+            // ui.cpp's flush_frame() -- invoked once per frame from
+            // graphics::swap_frames()'s frame-end hook (M4a fix round 1,
+            // `ui::end()` itself is now inert -- see ui.cpp) -- takes its own
+            // early-return ("if (!g_frame_open) return;") instead of calling
+            // begin_ui_pass()/window_view()/RenderDrawData, which is what
+            // actually protects swap_frames()'s Present() -- consistent with
+            // every OTHER window-touching block in this loop already being
+            // gated by !window_minimized.
+            bool ui_wants_mouse = !window_minimized && ui::is_registering_input();
+            if(!ui_wants_mouse) {
                 if (math::abs(input::mouse_scroll_delta()) > 0)
                     reset_pt = true;
                 radius = math::max(radius - input::mouse_scroll_delta() * 0.1, 0.01);
@@ -911,30 +1047,14 @@ int main(int argc, char **argv)
 
             if (input::key_pressed(KeyCode::ESC)) is_running = false; 
             if (input::key_pressed(KeyCode::F1)) show_ui = !show_ui; 
-            if (input::key_pressed(KeyCode::F2)) { // Reset particles + trails
-                update_particles(particles_x, particles_y, particles_z, particles_phi, particles_theta, particles_weights,
-                                NUM_PARTICLES, GRID_RESOLUTION_X, GRID_RESOLUTION_Y, GRID_RESOLUTION_Z, WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z, WORLD_CENTER_X, WORLD_CENTER_Y, WORLD_CENTER_Z, mean_weight);
-                graphics::update_structured_buffer(&particles_buffer_x, particles_x);
-                graphics::update_structured_buffer(&particles_buffer_y, particles_y);
-                graphics::update_structured_buffer(&particles_buffer_z, particles_z);
-                graphics::update_structured_buffer(&particles_buffer_phi, particles_phi);
-                graphics::update_structured_buffer(&particles_buffer_theta, particles_theta);
-                graphics::update_structured_buffer(&particles_buffer_weights, particles_weights);
-                float clear_tex[4] = {0, 0, 0, 0};
-                graphics_context->context->ClearUnorderedAccessViewFloat(trail_tex_A.ua_view, clear_tex);
-                graphics_context->context->ClearUnorderedAccessViewFloat(trail_tex_B.ua_view, clear_tex);
-                graphics_context->context->ClearUnorderedAccessViewFloat(trace_tex.ua_view, clear_tex);
-                reset_eplot();
-                simulation_config.n_iteration = 0;
-            }
+            if (input::key_pressed(KeyCode::F2)) reset_particles_and_trails();
             if (input::key_pressed(KeyCode::F3)) run_mold = !run_mold;
             if (input::key_pressed(KeyCode::F4)) turning_camera = !turning_camera;
             if (input::key_pressed(KeyCode::F5)) capture_agents = !capture_agents;
             if (input::key_pressed(KeyCode::F6)) store_deposit = true;
             if (input::key_pressed(KeyCode::F7)) capture_screen = !capture_screen;
             if (input::key_pressed(KeyCode::F8)) { // Reset only trace
-                float clear_trace[4] = {0, 0, 0, 0};
-                graphics_context->context->ClearUnorderedAccessViewFloat(trace_tex.ua_view, clear_trace);
+                graphics::clear_texture(&trace_tex, 0.0f);
             }
             if (input::key_pressed(KeyCode::F9)) {
                 std::fstream visu_state;
@@ -977,6 +1097,13 @@ int main(int argc, char **argv)
                 make_screenshot = true;
             }
         }
+      } else {
+        if (simulation_config.n_iteration >= headless_frames) {
+            // M5: fire the (unchanged) F6 export block later this frame.
+            if (export_on_exit) store_deposit = true;
+            is_running = false;
+        }
+      }
 
         // Update simulation config
         graphics::update_constant_buffer(&config_buffer, &simulation_config);
@@ -999,14 +1126,21 @@ int main(int argc, char **argv)
             graphics::set_structured_buffer(&particles_buffer_phi, 5);
             graphics::set_structured_buffer(&particles_buffer_theta, 6);
             graphics::set_structured_buffer(&particles_buffer_weights, 7);
-            int32_t grid_z = (NUM_PARTICLES / 100) / THREAD_GROUP_SIZE;
+            int32_t grid_z = ((active_agents + data_count) / 100) / THREAD_GROUP_SIZE;
             graphics::run_compute(10, 10, grid_z);
             graphics::unset_texture_compute(0);
             graphics::unset_texture_compute(1);
+            graphics::unset_structured_buffer(2);
+            graphics::unset_structured_buffer(3);
+            graphics::unset_structured_buffer(4);
+            graphics::unset_structured_buffer(5);
+            graphics::unset_structured_buffer(6);
+            graphics::unset_structured_buffer(7);
         }
 
         // Partial agent sorting
-        if (run_mold && sort_agents)
+        // M3+: cs_agents_sort not yet ported (upstream toggle is commented out; default off)
+        if (run_mold && sort_agents && graphics::is_ready(&sort_shader))
         {
             graphics::set_compute_shader(&sort_shader);
             graphics::set_structured_buffer(&particles_buffer_x, 2);
@@ -1015,13 +1149,19 @@ int main(int argc, char **argv)
             graphics::set_structured_buffer(&particles_buffer_phi, 5);
             graphics::set_structured_buffer(&particles_buffer_theta, 6);
             graphics::set_structured_buffer(&particles_buffer_weights, 7);
-            int32_t grid_z = (NUM_PARTICLES / 100) / THREAD_GROUP_SIZE;
+            int32_t grid_z = ((active_agents + data_count) / 100) / THREAD_GROUP_SIZE;
             // different attempts at addressing
             for (int i = 0; i < 256; ++i) {
                 graphics::run_compute(10, 10, grid_z / 256);
                 ++simulation_config.n_iteration;
                 graphics::update_constant_buffer(&config_buffer, &simulation_config);
             }
+            graphics::unset_structured_buffer(2);
+            graphics::unset_structured_buffer(3);
+            graphics::unset_structured_buffer(4);
+            graphics::unset_structured_buffer(5);
+            graphics::unset_structured_buffer(6);
+            graphics::unset_structured_buffer(7);
         }
 
         // Decay/diffusion
@@ -1035,6 +1175,7 @@ int main(int argc, char **argv)
                 graphics::set_texture_compute(&trail_tex_A, 1);
             }
             graphics::set_texture_compute(&trace_tex, 2);
+            graphics::set_constant_buffer(&config_buffer, 0);
             graphics::run_compute(GRID_RESOLUTION_X / 8, GRID_RESOLUTION_Y / 8, GRID_RESOLUTION_Z / 8);
             
             graphics::unset_texture_compute(0);
@@ -1061,28 +1202,48 @@ int main(int argc, char **argv)
             graphics::set_structured_buffer(&particles_buffer_weights, 5);
             graphics::set_structured_buffer(&halos_densities_buffer, 6);
 
-            int32_t grid_z = (NUM_PARTICLES / 100) / THREAD_GROUP_SIZE;
+            int32_t grid_z = ((active_agents + data_count) / 100) / THREAD_GROUP_SIZE;
             graphics::run_compute(10, 10, grid_z);
 
             graphics::unset_texture_compute(0);
+            graphics::unset_structured_buffer(1);
+            graphics::unset_structured_buffer(2);
+            graphics::unset_structured_buffer(3);
+            graphics::unset_structured_buffer(4);
+            graphics::unset_structured_buffer(5);
+            graphics::unset_structured_buffer(6);
         }
 
         // Export the current state of the simulation
         if (store_deposit)
         {
-            printf("Exporting simulation data...\n");
             store_deposit = false;
+            // Each export lands in its own timestamped subfolder so repeated
+            // F6 presses (or --export runs) never overwrite each other.
+            char export_timestamp[32];
+            time_t export_now = time(nullptr);
+            strftime(export_timestamp, sizeof(export_timestamp), "%Y-%m-%d_%H-%M-%S", localtime(&export_now));
+            std::string export_dir = std::string("export/") + export_timestamp;
+            std::filesystem::create_directories(export_dir);
+            printf("Exporting simulation data to %s/ ...\n", export_dir.c_str());
             if (is_a)
-                graphics::save_texture3D(&trail_tex_A, "export/deposit");
+                graphics::save_texture3D(&trail_tex_A, export_dir + "/deposit");
             else
-                graphics::save_texture3D(&trail_tex_B, "export/deposit");
-            graphics::save_texture3D(&trace_tex, "export/trace");
+                graphics::save_texture3D(&trail_tex_B, export_dir + "/deposit");
+            graphics::save_texture3D(&trace_tex, export_dir + "/trace");
 
             std::ofstream metadata;
-            metadata.open("export/export_metadata.txt", std::ofstream::out);
-            metadata << "dataset: " << DATASET_NAME << std::endl;
+            metadata.open(export_dir + "/export_metadata.txt", std::ofstream::out);
+            // M5: record the dataset actually loaded. Upstream wrote the
+            // compile-time DATASET_NAME macro — which was its ONLY possible
+            // source; with the port's --dataset override the macro can be
+            // wrong. Writing the effective `filename` preserves upstream
+            // *semantics* (record what was loaded), not upstream letters;
+            // --dataset is port infrastructure, so this is not a quirk
+            // violation (design §4).
+            metadata << "dataset: " << filename << std::endl;
             metadata << "number of data points: " << data_count << std::endl;
-            metadata << "number of agents: " << int(NUM_AGENTS) / 1e6 << "M" << std::endl;
+            metadata << "number of agents: " << active_agents / 1e6 << "M" << std::endl;
             metadata << "simulation grid resolution: " << int(GRID_RESOLUTION_X) << " x " << int(GRID_RESOLUTION_Y) << " x " << int(GRID_RESOLUTION_Z) << " [vox]" << std::endl;
             metadata << "simulation grid size: " << WORLD_SIZE_X << " x " << WORLD_SIZE_Y << " x " << WORLD_SIZE_Z << " [mpc]" << std::endl;
             metadata << "simulation grid center: (" << WORLD_CENTER_X << ", " << WORLD_CENTER_Y << ", " << WORLD_CENTER_Z << ") [mpc]" << std::endl;
@@ -1100,7 +1261,7 @@ int main(int argc, char **argv)
 
             graphics::capture_structured_buffer(&halos_densities_buffer, halos_densities, data_count, sizeof(float));
             std::ofstream halos_measurements;
-            halos_measurements.open("export/halos_measurements.csv", std::ofstream::out);
+            halos_measurements.open(export_dir + "/halos_measurements.csv", std::ofstream::out);
             halos_measurements.precision(5);
             halos_measurements << "M200b/10^12 | Trace | X (world) | Y (world) | Z (world) | X (grid) | Y (grid) | Z (grid) " << std::endl;
             for (int i = 0; i < data_count; ++i) {
@@ -1137,15 +1298,16 @@ int main(int argc, char **argv)
                 printf("Done exporting agents.\n");
             } else {
                 printf("Exporting agents, timestep %d/%d...\n", timestep_counter+1, N_AGENT_TIMESTEPS_TO_CAPTURE);
-                graphics::capture_structured_buffer(&particles_buffer_x, particles_x, NUM_PARTICLES, sizeof(float));
-                graphics::capture_structured_buffer(&particles_buffer_y, particles_y, NUM_PARTICLES, sizeof(float));
-                graphics::capture_structured_buffer(&particles_buffer_z, particles_z, NUM_PARTICLES, sizeof(float));
-                graphics::capture_structured_buffer(&particles_buffer_weights, particles_weights, NUM_PARTICLES, sizeof(float));
+                int32_t active_particles = active_agents + data_count;
+                graphics::capture_structured_buffer(&particles_buffer_x, particles_x, active_particles, sizeof(float));
+                graphics::capture_structured_buffer(&particles_buffer_y, particles_y, active_particles, sizeof(float));
+                graphics::capture_structured_buffer(&particles_buffer_z, particles_z, active_particles, sizeof(float));
+                graphics::capture_structured_buffer(&particles_buffer_weights, particles_weights, active_particles, sizeof(float));
                 std::ofstream agents;
                 agents.open("export/agents.txt", std::ofstream::out | std::ofstream::app);
                 agents << "*** timestep " << timestep_counter << " [X Y Z D] ***" << std::endl;
                 agents.precision(7);
-                for (int i = data_count; i < int(NUM_PARTICLES); ++i) {
+                for (int i = data_count; i < active_particles; ++i) {
                     agents 
                         << measure_grid_to_world(particles_x[i], WORLD_SIZE_X, float(GRID_RESOLUTION_X)) << " "
                         << measure_grid_to_world(particles_y[i], WORLD_SIZE_Y, float(GRID_RESOLUTION_Y)) << " "
@@ -1158,32 +1320,45 @@ int main(int argc, char **argv)
         }
 
         // Rendering
+        // window_minimized: skip the whole windowed frame (rendering + UI
+        // draws + present) when the window has a zero-sized dimension —
+        // main.cpp must not touch the (unconfigured-this-frame) surface or
+        // dispatch/draw with a zero screen dimension (M4a Task 2b).
+        if (!headless && !window_minimized)
         {
             graphics::set_render_targets_viewport(&render_target_window);
             graphics::clear_render_target(&render_target_window, background_color, background_color, background_color, 1.0);
             
             if(vis_mode == VisualizationMode::VM_PARTICLES) {
-                uint32_t clear_tex_uint[4] = {0, 0, 0, 0};
-                graphics_context->context->ClearUnorderedAccessViewUint(display_tex_uint.ua_view, clear_tex_uint);
+                graphics::clear_structured_buffer(&display_accum_buffer);
                 graphics::update_constant_buffer(&rendering_settings_buffer, &rendering_config);
+
+                // Splat particles into the accumulation buffer.
                 graphics::set_compute_shader(&draw_compute_shader_particle);
-                graphics::set_structured_buffer(&particles_buffer_theta, 6);
-                graphics::set_texture_compute(&display_tex_uint, 0);
+                graphics::set_constant_buffer(&rendering_settings_buffer, 0);  // per-dispatch, fork convention (carryover I3)
+                graphics::set_structured_buffer(&display_accum_buffer, 0);
                 graphics::set_structured_buffer(&particles_buffer_x, 2);
                 graphics::set_structured_buffer(&particles_buffer_y, 3);
                 graphics::set_structured_buffer(&particles_buffer_z, 4);
-
-                int32_t grid_z = (NUM_PARTICLES / 100) / THREAD_GROUP_SIZE;
+                graphics::set_structured_buffer(&particles_buffer_theta, 6);
+                int32_t grid_z = ((active_agents + data_count) / 100) / THREAD_GROUP_SIZE;
                 graphics::run_compute(10, 10, grid_z);
-                graphics::unset_texture_compute(0);
+                graphics::unset_structured_buffer(0);
+                graphics::unset_structured_buffer(2);
+                graphics::unset_structured_buffer(3);
+                graphics::unset_structured_buffer(4);
+                graphics::unset_structured_buffer(6);
 
+                // Blit accumulated counts into display_tex.
                 graphics::set_compute_shader(&blit_compute_shader);
-                graphics::set_texture_compute(&display_tex_uint, 0);
+                graphics::set_constant_buffer(&rendering_settings_buffer, 0);
+                graphics::set_structured_buffer(&display_accum_buffer, 0);
                 graphics::set_texture_compute(&display_tex, 1);
                 graphics::run_compute(window_width, window_height, 1);
-                graphics::unset_texture_compute(0);
+                graphics::unset_structured_buffer(0);
                 graphics::unset_texture_compute(1);
 
+                // Draw display_tex to the window.
                 graphics::set_vertex_shader(&vertex_shader_2d);
                 graphics::set_pixel_shader(&pixel_shader_2d);
                 graphics::set_texture(&display_tex, 0);
@@ -1199,13 +1374,16 @@ int main(int argc, char **argv)
                 graphics::set_vertex_shader(&vertex_shader);
                 graphics::set_texture(&trace_tex, 0);
                 graphics::set_texture_sampler(&tex_sampler_trace, 0);
+                PixelShader *selected_ps = nullptr;
                 if (vis_mode == VisualizationMode::VM_VOLUME) {
                     graphics::set_pixel_shader(&pixel_shader);
+                    selected_ps = &pixel_shader;
                     graphics::set_texture(&palette_trace_tex, 1);
                     graphics::set_texture_sampler(&tex_sampler_color_palette, 1);
                 }
                 else if (vis_mode == VisualizationMode::VM_VOLUME_HIGHLIGHT) {
                     graphics::set_pixel_shader(&ps_volume_highlight);
+                    selected_ps = &ps_volume_highlight;
                     if (is_a)
                         graphics::set_texture(&trail_tex_A, 1);
                     else
@@ -1214,6 +1392,7 @@ int main(int argc, char **argv)
                 }
                 else if (vis_mode == VisualizationMode::VM_VOLUME_HALOCOLOR) {
                     graphics::set_pixel_shader(&ps_volume_halocolor);
+                    selected_ps = &ps_volume_halocolor;
                     if (is_a)
                         graphics::set_texture(&trail_tex_A, 1);
                     else
@@ -1222,31 +1401,39 @@ int main(int argc, char **argv)
                 }
                 else if (vis_mode == VisualizationMode::VM_VOLUME_OVERDENSITY) {
                     graphics::set_pixel_shader(&ps_volume_overdensity);
+                    selected_ps = &ps_volume_overdensity;
                 }
                 else if (vis_mode == VisualizationMode::VM_VOLUME_VELOCITY) {
                     graphics::set_pixel_shader(&ps_volume_velocity);
+                    selected_ps = &ps_volume_velocity;
                 }
 
-                // Draw the stack most perpendicular to the current origin-relative camera position
-                float rotation_angle = 0.0;
-                if (math::abs(eye_pos.z) >= math::abs(eye_pos.x) && math::abs(eye_pos.z) >= math::abs(eye_pos.y)) {
-                    rotation_angle = (eye_pos.z > 0.0)? 0.0 : math::PI;
-                    rendering_config.model = math::get_rotation(rotation_angle, Vector3(0, 1, 0)) * math::get_scale(1.0, WORLD_SIZE_Y / WORLD_SIZE_X, WORLD_SIZE_Z / WORLD_SIZE_X);
-                    rendering_config.texcoord_map = (eye_pos.z > 0.0)? 1 : -1;
-                    graphics::update_constant_buffer(&rendering_settings_buffer, &rendering_config);
-                    graphics::draw_mesh(&super_quad_mesh);
-                } else if (math::abs(eye_pos.y) >= math::abs(eye_pos.x) && math::abs(eye_pos.y) >= math::abs(eye_pos.z)) {
-                    rotation_angle = (eye_pos.y > 0.0)? -math::PIHALF : math::PIHALF;
-                    rendering_config.model = math::get_rotation(rotation_angle, Vector3(1, 0, 0)) * math::get_scale(1.0, WORLD_SIZE_Z / WORLD_SIZE_X, WORLD_SIZE_Y / WORLD_SIZE_X);
-                    rendering_config.texcoord_map = (eye_pos.y > 0.0)? 2 : -2;
-                    graphics::update_constant_buffer(&rendering_settings_buffer, &rendering_config);
-                    graphics::draw_mesh(&super_quad_mesh);
-                } else if (math::abs(eye_pos.x) > math::abs(eye_pos.y) && math::abs(eye_pos.x) > math::abs(eye_pos.z)) {
-                    rotation_angle = (eye_pos.x > 0.0)? math::PIHALF : -math::PIHALF;
-                    rendering_config.model = math::get_rotation(rotation_angle, Vector3(0, 1, 0)) * math::get_scale(WORLD_SIZE_Z / WORLD_SIZE_X, WORLD_SIZE_Y / WORLD_SIZE_X, 1.0);
-                    rendering_config.texcoord_map = (eye_pos.x > 0.0)? 3 : -3;
-                    graphics::update_constant_buffer(&rendering_settings_buffer, &rendering_config);
-                    graphics::draw_mesh(&super_quad_mesh);
+                // M4b: real shader lands, gate stays as belt-and-suspenders
+                if (graphics::is_ready(&vertex_shader) && selected_ps && graphics::is_ready(selected_ps)) {
+                    // Draw the stack most perpendicular to the current origin-relative camera position
+                    float rotation_angle = 0.0;
+                    if (math::abs(eye_pos.z) >= math::abs(eye_pos.x) && math::abs(eye_pos.z) >= math::abs(eye_pos.y)) {
+                        rotation_angle = (eye_pos.z > 0.0)? 0.0 : math::PI;
+                        rendering_config.model = math::get_rotation(rotation_angle, Vector3(0, 1, 0)) * math::get_scale(1.0, WORLD_SIZE_Y / WORLD_SIZE_X, WORLD_SIZE_Z / WORLD_SIZE_X);
+                        rendering_config.texcoord_map = (eye_pos.z > 0.0)? 1 : -1;
+                        graphics::update_constant_buffer(&rendering_settings_buffer, &rendering_config);
+                        graphics::set_constant_buffer(&rendering_settings_buffer, 0);
+                        graphics::draw_mesh(&super_quad_mesh);
+                    } else if (math::abs(eye_pos.y) >= math::abs(eye_pos.x) && math::abs(eye_pos.y) >= math::abs(eye_pos.z)) {
+                        rotation_angle = (eye_pos.y > 0.0)? -math::PIHALF : math::PIHALF;
+                        rendering_config.model = math::get_rotation(rotation_angle, Vector3(1, 0, 0)) * math::get_scale(1.0, WORLD_SIZE_Z / WORLD_SIZE_X, WORLD_SIZE_Y / WORLD_SIZE_X);
+                        rendering_config.texcoord_map = (eye_pos.y > 0.0)? 2 : -2;
+                        graphics::update_constant_buffer(&rendering_settings_buffer, &rendering_config);
+                        graphics::set_constant_buffer(&rendering_settings_buffer, 0);
+                        graphics::draw_mesh(&super_quad_mesh);
+                    } else if (math::abs(eye_pos.x) > math::abs(eye_pos.y) && math::abs(eye_pos.x) > math::abs(eye_pos.z)) {
+                        rotation_angle = (eye_pos.x > 0.0)? math::PIHALF : -math::PIHALF;
+                        rendering_config.model = math::get_rotation(rotation_angle, Vector3(0, 1, 0)) * math::get_scale(WORLD_SIZE_Z / WORLD_SIZE_X, WORLD_SIZE_Y / WORLD_SIZE_X, 1.0);
+                        rendering_config.texcoord_map = (eye_pos.x > 0.0)? 3 : -3;
+                        graphics::update_constant_buffer(&rendering_settings_buffer, &rendering_config);
+                        graphics::set_constant_buffer(&rendering_settings_buffer, 0);
+                        graphics::draw_mesh(&super_quad_mesh);
+                    }
                 }
 
                 graphics::unset_texture(0);
@@ -1258,9 +1445,10 @@ int main(int argc, char **argv)
                     rendering_config.pt_iteration = 0;
                 }
                 graphics::update_constant_buffer(&rendering_settings_buffer, &rendering_config);
-                if (run_pt && rendering_config.pt_iteration < 1e5) {
+                if (run_pt && rendering_config.pt_iteration < 1e5 && graphics::is_ready(&cs_volpath)) {
                     graphics::set_compute_shader(&cs_volpath);
-                    graphics::set_texture_compute(&display_tex, 0);
+                    graphics::set_constant_buffer(&rendering_settings_buffer, 0);
+                    graphics::set_structured_buffer(&pt_accum_buffer, 0);
                     graphics::set_texture_sampled_compute(&trace_tex, 1);
                     graphics::set_texture_sampler_compute(&tex_sampler_trace, 1);
                     if (is_a) {
@@ -1268,28 +1456,49 @@ int main(int argc, char **argv)
                     } else {
                         graphics::set_texture_sampled_compute(&trail_tex_B, 2);
                     }
-                    graphics::set_texture_sampler(&tex_sampler_deposit, 2);
+                    // upstream typo: render-stage call in compute bind block — see m3/m4 carryovers
+                    graphics::set_texture_sampler_compute(&tex_sampler_deposit, 2);
                     graphics::set_texture_sampled_compute(&palette_trace_tex, 3);
                     graphics::set_texture_sampler_compute(&tex_sampler_color_palette, 3);
                     graphics::set_texture_sampled_compute(&palette_data_tex, 4);
                     graphics::set_texture_sampler_compute(&tex_sampler_color_palette, 4);
+                    // QUIRK(pt_ceil_dispatch): upstream truncates (screen/10) — bit-identical at
+                    // upstream's fixed window sizes (exact multiples of 10). Resizable windows are
+                    // this port's own extension; round UP so no dead pixel band, with the matching
+                    // OOB guard inside cs_volpath.wgsl. Adjudicated 2026-08-12.
                     graphics::run_compute(
-                        rendering_config.screen_width / int(PT_GROUP_SIZE_X),
-                        rendering_config.screen_height / int(PT_GROUP_SIZE_Y),
+                        (int(rendering_config.screen_width) + int(PT_GROUP_SIZE_X) - 1) / int(PT_GROUP_SIZE_X),
+                        (int(rendering_config.screen_height) + int(PT_GROUP_SIZE_Y) - 1) / int(PT_GROUP_SIZE_Y),
                         1);
-                    graphics::unset_texture_compute(0);
+                    graphics::unset_structured_buffer(0);
                     graphics::unset_texture_sampled_compute(1);
                     graphics::unset_texture_sampled_compute(2);
                     graphics::unset_texture_sampled_compute(3);
+                    // upstream omission: slot 4 (palette+sampler) was never unset — harmless in D3D11, fatal under run_compute's strict-match contract; same adjudication class as the :1280 typo
+                    graphics::unset_texture_sampled_compute(4);
+
+                    // Blit accumulator -> display_tex for ps_volpath to sample (design §2.6).
+                    graphics::set_compute_shader(&cs_volpath_blit);
+                    graphics::set_structured_buffer(&pt_accum_buffer, 0);
+                    graphics::set_texture_compute(&display_tex, 1);
+                    graphics::run_compute(window_width, window_height, 1);
+                    graphics::unset_structured_buffer(0);
+                    graphics::unset_texture_compute(1);
+
                     rendering_config.pt_iteration++;
                 }
 
-                graphics::set_vertex_shader(&vertex_shader_2d);
-                graphics::set_pixel_shader(&ps_volpath);
-                graphics::set_texture(&display_tex, 0);
-                graphics::set_texture_sampler(&tex_sampler_display, 0);
-                graphics::draw_mesh(&quad_mesh);
-                graphics::unset_texture(0);
+                // M4b: real shader lands, gate stays as belt-and-suspenders
+                if (graphics::is_ready(&ps_volpath)) {
+                    graphics::set_vertex_shader(&vertex_shader_2d);
+                    graphics::set_pixel_shader(&ps_volpath);
+                    graphics::set_texture(&display_tex, 0);
+                    graphics::set_texture_sampler(&tex_sampler_display, 0);
+                    // ps_volpath declares a cbuffer even though vs_2d doesn't — needs_group0 ORs both stages (design §5, 4th site)
+                    graphics::set_constant_buffer(&rendering_settings_buffer, 0);
+                    graphics::draw_mesh(&quad_mesh);
+                    graphics::unset_texture(0);
+                }
             }
         }
 
@@ -1304,7 +1513,8 @@ int main(int argc, char **argv)
                 norm_coef += float(density_histogram[b]);
                 energy += float(density_histogram[b]) * math::pow(HISTOGRAM_BASE, b-6);
             }
-            float mean = energy / norm_coef;
+            float energy_mean_this_frame = energy / norm_coef;
+            float mean = energy_mean_this_frame;
             float variance = float(density_histogram[0]) * math::square(-mean);
             for (int b = 1; b < N_HISTOGRAM_BINS-1; b++) {
                 variance += float(density_histogram[b]) * math::square(math::pow(HISTOGRAM_BASE, b-6) - mean);
@@ -1314,6 +1524,13 @@ int main(int argc, char **argv)
             // const float smoothing_coef = 0.5;
             // simulation_config.normalization_factor = smoothing_coef * simulation_config.normalization_factor + (1.0 - smoothing_coef) * mean;
 
+            // Headless acceptance: mean trace energy at data points must rise (skip warmup).
+            e_first = (e_first < 0.0f && simulation_config.n_iteration >= 10) ? energy_mean_this_frame : e_first;
+            e_last = energy_mean_this_frame;
+            if (headless && simulation_config.n_iteration % 50 == 0)
+                printf("[headless] iteration %d  E = %f\n", simulation_config.n_iteration, energy_mean_this_frame);
+
+          if (!headless && !window_minimized) {
             graphics::set_render_targets_viewport(&render_target_window);
 
             // Draw histogram
@@ -1438,22 +1655,23 @@ int main(int argc, char **argv)
             ui::draw_text("X", Vector2(trim_params.x - trim_params.z - 10.0, trim_params.y - 0.52 * trim_params.z), label_color);
 
             ui::end();
+          }
         }
 
         // Frame capturing
-        if (is_running && make_screenshot) {
+        if (!headless && is_running && make_screenshot) {
             uint32_t frame_number = graphics::capture_current_frame();
             std::stringstream stream;
-	        stream << "capture\\frame" << frame_number;
+	        stream << "capture/frame" << frame_number;
             graphics::save_texture2D_HDR(&display_tex, stream.str());
             make_screenshot = false;
         }
-        if (is_running && capture_screen) {
+        if (!headless && is_running && capture_screen) {
             graphics::capture_current_frame();
         }
 
         // UI
-        if (show_ui) {
+        if (!headless && !window_minimized && show_ui) {
             graphics::set_render_targets_viewport(&render_target_window);
 
             Panel panel = ui::start_panel("", Vector2(0.0, 0.0), 1.0);
@@ -1475,6 +1693,43 @@ int main(int argc, char **argv)
             reset_pt |= ui::add_slider(&panel, "PERSISTENCE", &simulation_config.decay_factor, 0.8, 0.995);
             // reset_pt |= ui::add_slider(&panel, "CENTER ATTRACTION", &simulation_config.center_attraction, 0.0, 10.0);
             reset_pt |= ui::add_slider(&panel, "SAMPLING EXP", &simulation_config.move_sense_coef, 0.0001, 10.0);
+
+            // Port QoL: runtime agent-count selection in 1M steps up to the
+            // config.polyp allocation (buffers stay at the max; only the
+            // dispatch range changes). Switching does a full F2-style reset:
+            // the trail field was deposited by the old population.
+            if (NUM_AGENTS >= 1000000) {
+                static int agent_option_count = 0;
+                static int32_t agent_option_agents[64];
+                static char agent_option_labels[64][12];
+                static const char *agent_option_ptrs[64];
+                if (agent_option_count == 0) {
+                    for (int m = 1; m <= NUM_AGENTS / 1000000 && agent_option_count < 63; ++m) {
+                        agent_option_agents[agent_option_count] = m * 1000000;
+                        snprintf(agent_option_labels[agent_option_count], sizeof(agent_option_labels[0]), "%dM", m);
+                        agent_option_ptrs[agent_option_count] = agent_option_labels[agent_option_count];
+                        ++agent_option_count;
+                    }
+                    if (NUM_AGENTS % 1000000 != 0) {   // odd config values keep their exact maximum
+                        agent_option_agents[agent_option_count] = NUM_AGENTS;
+                        snprintf(agent_option_labels[agent_option_count], sizeof(agent_option_labels[0]), "%.2fM", NUM_AGENTS / 1e6);
+                        agent_option_ptrs[agent_option_count] = agent_option_labels[agent_option_count];
+                        ++agent_option_count;
+                    }
+                }
+                static int agent_selected = -1;
+                if (agent_selected < 0) {
+                    agent_selected = agent_option_count - 1;
+                    for (int i = 0; i < agent_option_count; ++i)
+                        if (agent_option_agents[i] == active_agents) agent_selected = i;
+                }
+                if (ui::add_combo(&panel, "AGENT COUNT", &agent_selected, agent_option_ptrs, agent_option_count)) {
+                    active_agents = agent_option_agents[agent_selected];
+                    simulation_config.n_agents = active_agents;
+                    reset_particles_and_trails();
+                    reset_pt = true;
+                }
+            }
 
             float swgt = log(rendering_config.sample_weight) / log(10.0);
             reset_pt |= ui::add_slider(&panel, "TRACE WEIGHT", &swgt, -5.0, 3.0);
@@ -1617,22 +1872,58 @@ int main(int argc, char **argv)
             }
 
             ui::end_panel(&panel);
+
+            // Port QoL: keyboard/mouse reference in its own panel, collapsed
+            // by default (state persists via imgui.ini after first launch).
+            Panel help = ui::start_panel_collapsed("SHORTCUTS", Vector2(0.0, 0.0), 1.0);
+            ui::add_text(&help, "ESC     quit");
+            ui::add_text(&help, "F1      show/hide UI");
+            ui::add_text(&help, "F2      reset particles + trails");
+            ui::add_text(&help, "F3      pause/resume simulation");
+            ui::add_text(&help, "F4      auto-orbit camera");
+            ui::add_text(&help, "F5      toggle agent capture (export/agents.txt)");
+            ui::add_text(&help, "F6      export deposit/trace/metadata (export/<timestamp>/)");
+            ui::add_text(&help, "F7      toggle frame capture (stub in port)");
+            ui::add_text(&help, "F8      clear trace");
+            ui::add_text(&help, "F9      save camera + visual state");
+            ui::add_text(&help, "F10     restore camera + visual state");
+            ui::add_text(&help, "1       HDR screenshot (stub in port)");
+            ui::add_text(&help, "");
+            ui::add_text(&help, "L-drag  orbit camera");
+            ui::add_text(&help, "R-drag  pan camera");
+            ui::add_text(&help, "scroll  zoom");
+            ui::end_panel(&help);
+
             ui::end();
         }
 
         if (run_mold) {
             ++simulation_config.n_iteration;
         }
-        graphics::swap_frames();
+        if (!headless) ui::end();   // guarantee exactly one ImGui Render per frame (design §4.2)
+        if (!headless) graphics::swap_frames();
+        // else: no swap chain to present to. capture_structured_buffer() in the
+        // histogram statistics block above already forces a command-queue flush
+        // every frame (verified empirically: the [headless] printf every 50
+        // iterations shows n_iteration progressing and E changing frame to frame).
     }
 
-    ui::release();
+    if (headless) {
+        if (e_first < 0.0f) { printf("[headless] too few iterations to capture baseline (need > 10)\n"); return 1; }
+        printf("[headless] E first=%f last=%f -> %s\n", e_first, e_last,
+               (e_last > e_first * 1.05f) ? "ENERGY RISING" : "ENERGY NOT RISING");
+        if (!(e_last > e_first * 1.05f)) { return 1; }
+    }
+
+    if (!headless) ui::release();
     graphics::release(&render_target_window);
     graphics::release(&depth_buffer);
     graphics::release(&pixel_shader);
     graphics::release(&ps_volume_overdensity);
     graphics::release(&ps_volume_highlight);
     graphics::release(&ps_volume_halocolor);
+    graphics::release(&ps_volume_velocity);
+    graphics::release(&ps_volpath);
     graphics::release(&vertex_shader);
     graphics::release(&pixel_shader_2d);
     graphics::release(&vertex_shader_2d);
@@ -1642,17 +1933,19 @@ int main(int argc, char **argv)
     graphics::release(&sort_shader);
     graphics::release(&decay_compute_shader);
     graphics::release(&cs_density_histo);
+    graphics::release(&cs_volpath);
+    graphics::release(&cs_volpath_blit);
     graphics::release(&quad_mesh);
     graphics::release(&super_quad_mesh);
     graphics::release(&trail_tex_A);
     graphics::release(&trail_tex_B);
     graphics::release(&trace_tex);
     graphics::release(&display_tex);
-    graphics::release(&display_tex_uint);
     graphics::release(&palette_trace_tex);
     graphics::release(&palette_data_tex);
     graphics::release(&tex_sampler_trace);
     graphics::release(&tex_sampler_deposit);
+    graphics::release(&tex_sampler_display);
     graphics::release(&tex_sampler_color_palette);
     graphics::release(&config_buffer);
     graphics::release(&particles_buffer_x);
@@ -1663,6 +1956,8 @@ int main(int argc, char **argv)
     graphics::release(&particles_buffer_weights);
     graphics::release(&density_histogram_buffer);
     graphics::release(&halos_densities_buffer);
+    graphics::release(&display_accum_buffer);
+    graphics::release(&pt_accum_buffer);
     graphics::release(&rendering_settings_buffer);
     graphics::release();
 

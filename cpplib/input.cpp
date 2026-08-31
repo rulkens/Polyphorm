@@ -1,4 +1,5 @@
 #include "input.h"
+#include <cstring>
 
 // Input state variables
 bool mouse_lbutton_pressed   = false;

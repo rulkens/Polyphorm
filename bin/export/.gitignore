@@ -2,3 +2,17 @@
 /rerouting=0_deposit=log/
 /rerouting=1_deposit=log/
 /rerouting=1_deposit=linear/
+
+# Timestamped per-export subfolders (F6 / --export)
+/????-??-??_??-??-??/
+
+# M5: generated headless-export artifacts (deposit/trace are ~1.2 GB each
+# at the VAC grid — never committed; the run log records provenance instead)
+/deposit.bin
+/trace.bin
+/export_metadata.txt
+/halos_measurements.csv
+/agents.txt
+
+# Generated OpenVDB conversions
+/*.vdb

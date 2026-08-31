@@ -1,1427 +1,1234 @@
 #include "graphics.h"
-#include "memory.h"
-#include <d3dcompiler.h>
-#include <assert.h>
-#ifdef CPPLIB_DEBUG_PRINTS
-#include "logging.h"
-#define PRINT_DEBUG(message, ...) logging::print_error(message, ##__VA_ARGS__)
-#else
-#define PRINT_DEBUG(message, ...)
-#endif
+#include <cassert>
+#include <cstring>
+#include <cstdio>
+#include <vector>
 #include <fstream>
-#include <sstream>
-#include <ios>
-#define RELEASE_DX_RESOURCE(resource) if(resource) resource->Release(); resource = NULL;
 
-// Global variables, only one of those for the whole application!
+#define STB_IMAGE_IMPLEMENTATION
+#define STBI_ONLY_TGA   // palettes are the only stbi consumers; keep the object small
+#include "stb_image.h"
 
-// Just so we don't have to reference graphics_context with &, we're doing this "trick"
-static GraphicsContext graphics_context_;
-GraphicsContext *graphics_context = &graphics_context_;
+graphics::GraphicsContext *graphics_context = nullptr;
 
-// The same as above
-static SwapChain swap_chain_;
-static SwapChain *swap_chain = &swap_chain_;
+namespace graphics {
 
-// We're simplifying blending to just two options - alpha blending and opaque (solid) blending
-static ID3D11BlendState *blend_states[2];
+// ---- internal state ----
+static GraphicsContext g_ctx;
+static GpuContext g_gpu;
+static wgpu::CommandEncoder g_encoder;
+static wgpu::SurfaceTexture g_surface_tex;       // acquired lazily per frame
+static bool g_surface_tex_acquired = false;
+static BlendType g_blend = BlendType::OPAQUE;
 
-// Let's store current blend type, useful when we want to restore original blending state in the end of the function
-static BlendType current_blend_type;
+// Compute binding shadow state (Task 5 consumes):
+struct BoundSlot {
+    enum class Kind { NONE, STORAGE_BUFFER, STORAGE_TEX, SAMPLED_TEX } kind = Kind::NONE;
+    wgpu::Buffer buffer;
+    uint64_t buffer_size = 0;
+    wgpu::TextureView view;
+};
+static const uint32_t MAX_SLOTS = 16;
+static BoundSlot g_compute_slots[MAX_SLOTS];
+// Independent per-slot compute-sampler storage (DESIGN §6.3): a sampled
+// texture (g_compute_slots[slot], Kind::SAMPLED_TEX) and its paired sampler
+// must coexist at the same slot number — cs_volpath's WGSL binds both a
+// texture_2d and a sampler at the same logical slot. Storing the sampler in
+// BoundSlot itself (the pre-fix shape) meant set_texture_sampler_compute's
+// `g_compute_slots[slot] = {}` reset erased whichever resource had just been
+// written to that slot, and vice versa. Compute samplers bind at
+// @group(1) @binding(MAX_SLOTS + slot) = 16 + N: resources keep binding==slot
+// so all pre-M4 shaders are unchanged; cs_volpath's WGSL (M4b) declares
+// @binding(17/18/19/20) for its s1/s2/s3/s4 samplers.
+static wgpu::Sampler g_compute_samplers[MAX_SLOTS];
+static wgpu::Buffer g_uniform_buffer;            // group 0 binding 0
+static uint64_t g_uniform_size = 0;
+static ComputeShader *g_compute_shader = nullptr;
 
-static ID3D11RasterizerState *raster_states[2];
+// Render-path shadow state (Task 1 / M3, render-path-design.md §2/§5).
+// Render slots are independent of g_compute_slots and are a {view, sampler}
+// PAIR per slot (not a tagged union) — a texture write and a sampler write
+// to the same slot must both survive, unlike the compute path's single-`kind`
+// BoundSlot (design §5's documented divergence from the compute convention).
+static VertexShader *g_vertex_shader = nullptr;
+static PixelShader  *g_pixel_shader  = nullptr;
+static RenderTarget  g_render_target = {};
+struct RenderSlot { wgpu::TextureView view; wgpu::Sampler sampler; };
+static RenderSlot g_render_slots[MAX_SLOTS];
 
-// Do the same for RasterType as for BlendType
-static RasterType current_raster_type;
+// Lazy render-pipeline cache (design §2). Cache key deliberately omits
+// depth-attachment presence: depth is never bound for the whole M3/M4
+// lifetime (§7). Design §2 also proposed omitting target FORMAT from the
+// key, reasoning main.cpp always draws to the window's fixed sRGB BGRA8
+// view — but that assumption holds only for main.cpp, not for this task's
+// own headless tests: render_path_tests draws into an offscreen
+// RGBA32_FLOAT RenderTarget (via get_render_target) to make draw_mesh
+// verifiable without a window. A hardcoded BGRA8UnormSrgb target format
+// would make that draw fail Dawn's render-pass/pipeline attachment-
+// compatibility validation outright. DEVIATION: target format IS included
+// in the key and in the pipeline descriptor (derived from g_render_target
+// at draw time — window => BGRA8UnormSrgb matching window_view(), offscreen
+// => RenderTarget::format) — this is exactly the widening design §2's own
+// risk register anticipated ("a future milestone that adds an offscreen
+// target... knows to widen the key rather than silently reuse a wrong-
+// format cached pipeline"), done now because Task 1 introduces that
+// offscreen target itself. main.cpp's real M3/M4 draws are unaffected: they
+// only ever target the window, so this always resolves to the same
+// BGRA8UnormSrgb entry design §2 assumed.
+struct PipelineCacheEntry {
+    WGPUShaderModule vs = nullptr, ps = nullptr;
+    BlendType blend = BlendType::OPAQUE;
+    uint32_t stride = 0;
+    wgpu::TextureFormat target_format = wgpu::TextureFormat::Undefined;
+    // DESIGN §6.4: folded into the key (previously omitted, a comment-only
+    // caveat) — TRIANGLESTRIP is currently unused by any shipped shader so
+    // this was latent, but a cache hit that silently reused a TRIANGLELIST
+    // pipeline for a TRIANGLESTRIP mesh (same vs/ps/blend/stride/format)
+    // would be a real, hard-to-diagnose bug once TRIANGLESTRIP is exercised.
+    Topology topology = Topology::TRIANGLELIST;
+    wgpu::RenderPipeline pipeline;
+};
+static std::vector<PipelineCacheEntry> g_pipeline_cache;
 
-/////////////////////////////////////////////////////
-/// Public API
-/////////////////////////////////////////////////////
+// One lazily-built pipeline + scratch uniform per builtin clear kernel
+// (declared here, ahead of release(), so release() can reset them; the WGSL
+// sources and ensure_clear_kernel()/run_clear() stay further down near the
+// clear_texture* entry points).
+struct ClearKernel {
+    wgpu::ComputePipeline pipeline;
+    wgpu::Buffer uniform;   // 16 bytes
+};
+static ClearKernel g_clear3d, g_clear2d_f, g_clear2d_u;
 
-bool graphics::init(LUID *adapter_luid)
-{
-	UINT flags = D3D11_CREATE_DEVICE_SINGLETHREADED;
-#ifdef DEBUG
-	flags |= D3D11_CREATE_DEVICE_DEBUG;
-#endif
+// Forward declarations: get_render_target (below) needs the format
+// conversion helper that's otherwise defined further down, next to the
+// other texture helpers it belongs with.
+static wgpu::TextureFormat to_wgpu(Format f);
 
-	// Create IDXGIFactory, needed for probing avaliable devices/adapters
-	IDXGIFactory *idxgi_factory;
-	HRESULT hr = CreateDXGIFactory(__uuidof(IDXGIFactory), (void**)(&idxgi_factory));
-	if (FAILED(hr))
-	{
-		PRINT_DEBUG("Failed to create IDXGI factory.");
-		return false;
-	}
-
-	// Get adapter to use for creating D3D11Device
-	IDXGIAdapter *adapter = NULL;
-
-	// In case adapter LUID was specified, go through available adapters and pick the one with specified LUID
-	if (adapter_luid)
-	{
-		IDXGIAdapter *temp_adapter = NULL;
-		for (uint32_t i = 0; idxgi_factory->EnumAdapters(i, &temp_adapter) != DXGI_ERROR_NOT_FOUND; ++i) 
-		{ 
-			DXGI_ADAPTER_DESC temp_adapter_desc;
-			temp_adapter->GetDesc(&temp_adapter_desc);
-			if(memcmp(&temp_adapter_desc.AdapterLuid, adapter_luid, sizeof(LUID)) == 0)
-			{
-				adapter = temp_adapter;
-				break;
-			}
-			temp_adapter->Release();
-		}
-	}
-	idxgi_factory->Release();
-
-	// Create D3D11Device and D3D11DeviceContext
-	D3D_FEATURE_LEVEL feature_level = D3D_FEATURE_LEVEL_11_0;
-	D3D_FEATURE_LEVEL supported_feature_level;
-
-	auto driver_type = adapter ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE;
-	hr = D3D11CreateDevice(adapter, driver_type, NULL, flags, &feature_level, 1, D3D11_SDK_VERSION, &graphics_context->device, &supported_feature_level, &graphics_context->context);
-	if (FAILED(hr)) {
-		PRINT_DEBUG("Failed to create D3D11 Device.");
-		return false;
-	}
-
-	// Release adapter handle if not NULL
-	if (adapter)
-	{
-		adapter->Release();
-	}
-
-	// Initialize blending states
-	// For solid blend state, blend_state_desc is zeroed.
-	D3D11_BLEND_DESC blend_state_desc = {};
-	blend_state_desc.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
-
-	hr = graphics_context->device->CreateBlendState(&blend_state_desc, &blend_states[BlendType::OPAQUE]);
-	if (FAILED(hr)) {
-		PRINT_DEBUG("Failed to create blend state.");
-		return false;
-	}
-
-	// Initialize alpha blend state
-	blend_state_desc.RenderTarget[0].BlendEnable 		   = TRUE;
-	blend_state_desc.RenderTarget[0].SrcBlend              = D3D11_BLEND_SRC_ALPHA;
-	blend_state_desc.RenderTarget[0].DestBlend 			   = D3D11_BLEND_INV_SRC_ALPHA;
-	blend_state_desc.RenderTarget[0].BlendOp	 		   = D3D11_BLEND_OP_ADD;
-	blend_state_desc.RenderTarget[0].SrcBlendAlpha	 	   = D3D11_BLEND_ONE;
-	blend_state_desc.RenderTarget[0].DestBlendAlpha	 	   = D3D11_BLEND_ZERO;
-	blend_state_desc.RenderTarget[0].BlendOpAlpha	 	   = D3D11_BLEND_OP_ADD;
-
-	hr = graphics_context->device->CreateBlendState(&blend_state_desc, &blend_states[BlendType::ALPHA]);
-	if (FAILED(hr)) {
-		PRINT_DEBUG("Failed to create blend state.");
-		return false;
-	}
-	
-	current_blend_type = BlendType::OPAQUE;
-
-	// Initialize rasterizer states
-	// Initialize solid rasterizer state, let's follow RH coordinate system like sane people
-	D3D11_RASTERIZER_DESC rasterizer_desc_solid = {};
-	rasterizer_desc_solid.FillMode = D3D11_FILL_SOLID;
-	rasterizer_desc_solid.CullMode = D3D11_CULL_NONE;
-	rasterizer_desc_solid.FrontCounterClockwise = TRUE;
-
-	hr = graphics_context->device->CreateRasterizerState(&rasterizer_desc_solid, &raster_states[RasterType::SOLID]);
-	if (FAILED(hr)) {
-		PRINT_DEBUG("Failed to create Rasterizer state");
-		return false;
-	}
-
-	// Initialize wireframe rasterizer state, let's follow RH coordinate system like sane people
-	D3D11_RASTERIZER_DESC rasterizer_desc_wireframe = {};
-	rasterizer_desc_wireframe.FillMode = D3D11_FILL_WIREFRAME;
-	rasterizer_desc_wireframe.CullMode = D3D11_CULL_BACK;
-	rasterizer_desc_wireframe.FrontCounterClockwise = TRUE;
-
-	hr = graphics_context->device->CreateRasterizerState(&rasterizer_desc_wireframe, &raster_states[RasterType::WIREFRAME]);
-	if (FAILED(hr))
-	{
-		PRINT_DEBUG("Failed to create Rasterizer state");
-		return false;
-	}
-
-	current_raster_type = RasterType::SOLID;
-	graphics_context->context->RSSetState(raster_states[current_raster_type]);
-	return true;
+static void ensure_encoder() {
+    if (!g_encoder) g_encoder = g_ctx.device.CreateCommandEncoder();
 }
 
-bool graphics::init_swap_chain(Window *window)
-{
-	DXGI_SWAP_CHAIN_DESC swap_chain_desc = {};
-
-	swap_chain_desc.BufferDesc.Width = window->window_width;
-	swap_chain_desc.BufferDesc.Height = window->window_height;
-	swap_chain_desc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-	swap_chain_desc.SampleDesc.Count = 1;
-	swap_chain_desc.SampleDesc.Quality = 0;
-	swap_chain_desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-	swap_chain_desc.BufferCount = 2;
-	swap_chain_desc.OutputWindow = window->window_handle;
-	swap_chain_desc.BufferDesc.RefreshRate.Numerator = 60;
-	swap_chain_desc.BufferDesc.RefreshRate.Denominator = 1;
-	swap_chain_desc.Windowed = true;
-	swap_chain_desc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH;
-	swap_chain_desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
-
-	IDXGIFactory * idxgi_factory;
-	HRESULT hr = CreateDXGIFactory(__uuidof(IDXGIFactory), (void**)(&idxgi_factory));
-	if (FAILED(hr)) {
-		PRINT_DEBUG("Failed to create IDXGI factory.");
-		return false;
-	}
-
-	hr = idxgi_factory->CreateSwapChain(graphics_context->device, &swap_chain_desc, &swap_chain->swap_chain);
-	if (FAILED(hr)) {
-		PRINT_DEBUG("Failed to create DXGI swap chain.");
-		return false;
-	}
-
-	idxgi_factory->Release();
-	return true;
+static void flush_commands() {
+    if (!g_encoder) return;
+    wgpu::CommandBuffer commands = g_encoder.Finish();
+    g_ctx.queue.Submit(1, &commands);
+    g_encoder = nullptr;
 }
 
-RenderTarget graphics::get_render_target_window()
-{
-	// NOTE: buffer.sr_view is not filled and remains NULL - window render target cannot be used as a texture in shader
-	RenderTarget buffer = {};
-
-	HRESULT hr = swap_chain->swap_chain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void **)&buffer.texture);
-	if (FAILED(hr)) {
-		PRINT_DEBUG("Failed to get swap chain buffer.");
-		return RenderTarget{};
-	}
-
-	DXGI_SWAP_CHAIN_DESC swap_chain_desc;
-	hr = swap_chain->swap_chain->GetDesc(&swap_chain_desc);
-	if (FAILED(hr)) {
-		PRINT_DEBUG("Failed to get swap chain description.");
-		return RenderTarget{};
-	}
-
-	D3D11_RENDER_TARGET_VIEW_DESC render_target_desc = {};
-	render_target_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
-	render_target_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
-	hr = graphics_context->device->CreateRenderTargetView(buffer.texture, &render_target_desc, &buffer.rt_view);
-	if (FAILED(hr)) {
-		PRINT_DEBUG("Failed to create swap chain render target.");
-		return RenderTarget{};
-	}
-
-	buffer.width = swap_chain_desc.BufferDesc.Width;
-	buffer.height = swap_chain_desc.BufferDesc.Height;
-
-	return buffer;
+// Blocking pump: process events until `done` flips. Used by readback and
+// pipeline-error scopes. Mirrors gpu_context.cpp's request pumps.
+static void wait_for(bool *done) {
+    while (!*done) g_gpu.instance.ProcessEvents();
 }
 
-RenderTarget graphics::get_render_target(uint32_t width, uint32_t height, DXGI_FORMAT format)
-{
-	RenderTarget buffer = {};
-
-	D3D11_TEXTURE2D_DESC texture_desc = {};
-	texture_desc.Width = width;
-	texture_desc.Height = height;
-	texture_desc.MipLevels = 1;
-	texture_desc.ArraySize = 1;
-	texture_desc.Format = format;
-	texture_desc.SampleDesc.Count = 1;
-	texture_desc.SampleDesc.Quality = 0;
-	texture_desc.Usage = D3D11_USAGE_DEFAULT;
-	texture_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
-
-	HRESULT hr = graphics_context->device->CreateTexture2D(&texture_desc, NULL, &buffer.texture);
-	if (FAILED(hr)) {
-		PRINT_DEBUG("Failed to create texture for render target buffer.");
-		return RenderTarget{};
-	}
-
-	D3D11_RENDER_TARGET_VIEW_DESC render_target_desc = {};
-	render_target_desc.ViewDimension = D3D11_RTV_DIMENSION_TEXTURE2D;
-	render_target_desc.Format = format;
-
-	hr = graphics_context->device->CreateRenderTargetView(buffer.texture, &render_target_desc, &buffer.rt_view);
-	if (FAILED(hr)) {
-		PRINT_DEBUG("Failed to create render target view.");
-		return RenderTarget{};
-	}
-
-	D3D11_SHADER_RESOURCE_VIEW_DESC shader_resource_desc = {};
-	shader_resource_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-	shader_resource_desc.Format = format;
-	shader_resource_desc.Texture2D.MipLevels = 1;
-	shader_resource_desc.Texture2D.MostDetailedMip = 0;
-
-	hr = graphics_context->device->CreateShaderResourceView(buffer.texture, &shader_resource_desc, &buffer.sr_view);
-	if (FAILED(hr)) {
-		PRINT_DEBUG("Failed to create shader resource view.");
-		return RenderTarget{};
-	}
-
-	buffer.width = width;
-	buffer.height = height;
-
-	return buffer;
+bool init() {
+    if (!gpu::init_device(&g_gpu)) return false;
+    g_ctx.device = g_gpu.device;
+    g_ctx.queue = g_gpu.queue;
+    g_ctx.gpu = &g_gpu;
+    graphics_context = &g_ctx;
+    return true;
 }
 
-void graphics::clear_render_target(RenderTarget *buffer, float r, float g, float b, float a)
-{
-	float color[4] = { r, g, b, a };
-	graphics_context->context->ClearRenderTargetView(buffer->rt_view, color);
+bool init_swap_chain(Window *window) {
+    return gpu::init_surface(&g_gpu, window);
 }
 
-DepthBuffer graphics::get_depth_buffer(uint32_t width, uint32_t height)
-{
-	DepthBuffer buffer = {};
-
-	D3D11_TEXTURE2D_DESC texture_desc = {};
-	texture_desc.Width = width;
-	texture_desc.Height = height;
-	texture_desc.MipLevels = 1;
-	texture_desc.ArraySize = 1;
-	texture_desc.Format = DXGI_FORMAT_R24G8_TYPELESS;
-	texture_desc.SampleDesc.Count = 1;
-	texture_desc.SampleDesc.Quality = 0;
-	texture_desc.Usage = D3D11_USAGE_DEFAULT;
-	texture_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_DEPTH_STENCIL;
-
-	HRESULT hr = graphics_context->device->CreateTexture2D(&texture_desc, NULL, &buffer.texture);
-	if (FAILED(hr)) {
-		PRINT_DEBUG("Failed to create texture for depth stencil buffer.");
-		return DepthBuffer{};
-	}
-
-	D3D11_DEPTH_STENCIL_VIEW_DESC depth_stencil_desc = {};
-	depth_stencil_desc.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
-	depth_stencil_desc.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
-
-	hr = graphics_context->device->CreateDepthStencilView(buffer.texture, &depth_stencil_desc, &buffer.ds_view);
-	if (FAILED(hr)) {
-		PRINT_DEBUG("Failed to create depth stencil view.");
-		return DepthBuffer{};
-	}
-
-	D3D11_SHADER_RESOURCE_VIEW_DESC shader_resource_desc = {};
-	shader_resource_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-	shader_resource_desc.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
-	shader_resource_desc.Texture2D.MipLevels = 1;
-	shader_resource_desc.Texture2D.MostDetailedMip = 0;
-
-	hr = graphics_context->device->CreateShaderResourceView(buffer.texture, &shader_resource_desc, &buffer.sr_view);
-	if (FAILED(hr)) {
-		PRINT_DEBUG("Failed to create shader resource view.");
-		return DepthBuffer{};
-	}
-
-	buffer.width = width;
-	buffer.height = height;
-
-	return buffer;
+void resize_surface(uint32_t fb_width, uint32_t fb_height) {
+    // Minimized/degenerate window: skip Configure entirely (Dawn requires a
+    // positive extent). The caller (main.cpp) is expected to also skip
+    // rendering for that frame — see graphics.h's resize_surface comment.
+    if (fb_width == 0 || fb_height == 0) return;
+    gpu::resize_surface(&g_gpu, fb_width, fb_height);
 }
 
-void graphics::clear_depth_buffer(DepthBuffer *buffer)
-{
-	graphics_context->context->ClearDepthStencilView(buffer->ds_view, D3D11_CLEAR_DEPTH, 1.0f, 0);
+RenderTarget get_render_target_window() {
+    RenderTarget rt = {};
+    rt.is_window = true;
+    rt.width = g_gpu.width;
+    rt.height = g_gpu.height;
+    return rt;
 }
 
-void graphics::set_viewport(RenderTarget *buffer)
-{
-	D3D11_VIEWPORT viewport = {};
-	viewport.Width = (float)buffer->width;
-	viewport.Height = (float)buffer->height;
-	viewport.MaxDepth = 1.0f;
-	graphics_context->context->RSSetViewports(1, &viewport);
+// M3: real offscreen render target. Never called by main.cpp (all
+// "offscreen" buffers in the original are compute-written textures, not
+// render targets — inventory §3) but implemented for real here because
+// render_path_tests needs a headless draw_mesh target with a readback path
+// (RenderAttachment for draw_mesh's own pass, CopySrc for the test's
+// CopyTextureToBuffer readback).
+RenderTarget get_render_target(uint32_t width, uint32_t height, Format format) {
+    RenderTarget rt = {};
+    wgpu::TextureDescriptor desc = {};
+    desc.size = {width, height, 1};
+    desc.format = to_wgpu(format);
+    desc.mipLevelCount = 1;
+    desc.usage = wgpu::TextureUsage::RenderAttachment | wgpu::TextureUsage::CopySrc;
+    rt.texture = g_ctx.device.CreateTexture(&desc);
+    rt.rt_view = rt.texture.CreateView();
+    rt.width = width; rt.height = height;
+    rt.is_window = false;
+    rt.format = format;
+    return rt;
 }
 
-void graphics::set_viewport(DepthBuffer *buffer)
-{
-	D3D11_VIEWPORT viewport = {};
-	viewport.Width = (float)buffer->width;
-	viewport.Height = (float)buffer->height;
-	viewport.MaxDepth = 1.0f;
-	graphics_context->context->RSSetViewports(1, &viewport);
+// Acquire the surface texture for this frame if not already held.
+// Format kept in sync with get_window_surface_format() below — single
+// source of truth (M4a design §1.3); if this hardcoded format ever changes,
+// update that accessor too.
+static wgpu::TextureView window_view() {
+    if (!g_surface_tex_acquired) {
+        g_gpu.surface.GetCurrentTexture(&g_surface_tex);
+        if (g_surface_tex.status != wgpu::SurfaceGetCurrentTextureStatus::SuccessOptimal &&
+            g_surface_tex.status != wgpu::SurfaceGetCurrentTextureStatus::SuccessSuboptimal) {
+            fprintf(stderr, "[graphics] surface texture acquisition failed\n");
+            return nullptr;
+        }
+        g_surface_tex_acquired = true;
+    }
+    wgpu::TextureViewDescriptor view_desc = {};
+    view_desc.format = wgpu::TextureFormat::BGRA8UnormSrgb; // sRGB view over the
+    // BGRA8Unorm surface — preserves the original's sRGB-over-UNORM gamma quirk
+    // (inventory §1, get_render_target_window). Surface must be configured with
+    // this viewFormat in gpu::init_surface — if M1's configure lacks
+    // `viewFormats`, add it there (1-line: viewFormatCount=1, viewFormats=&srgb).
+    return g_surface_tex.texture.CreateView(&view_desc);
 }
 
-void graphics::set_viewport(Viewport *target_viewport)
-{
-	D3D11_VIEWPORT viewport = {};
+wgpu::TextureFormat get_window_surface_format() { return wgpu::TextureFormat::BGRA8UnormSrgb; }
 
-	viewport.Width    = target_viewport->width;
-	viewport.Height   = target_viewport->height;
-	viewport.TopLeftX = target_viewport->x;
-	viewport.TopLeftY = target_viewport->y;
-	viewport.MaxDepth = 1.0f;
-
-	graphics_context->context->RSSetViewports(1, &viewport);
+void set_render_targets_viewport(RenderTarget *buffer) {
+    // D3D11 version set OM targets + viewport. WebGPU render passes carry the
+    // target; viewport is full-target by default (design §4 — no SetViewport
+    // call needed anywhere: the default viewport already spans the full
+    // color-attachment extent, matching "main.cpp never sets a
+    // partial/custom viewport"). Recording `g_render_target` here is the only
+    // way draw_mesh (which takes no target argument) knows where to render.
+    g_render_target = *buffer;
 }
 
-void graphics::set_render_targets(DepthBuffer *buffer)
-{
-	ID3D11RenderTargetView **null = { NULL };
-	graphics_context->context->OMSetRenderTargets(0, null, buffer->ds_view);
+void clear_render_target(RenderTarget *buffer, float r, float g, float b, float a) {
+    ensure_encoder();
+    wgpu::TextureView view = buffer->is_window ? window_view() : buffer->rt_view;
+    if (!view) return;
+    wgpu::RenderPassColorAttachment att = {};
+    att.view = view;
+    att.loadOp = wgpu::LoadOp::Clear;
+    att.storeOp = wgpu::StoreOp::Store;
+    att.clearValue = {r, g, b, a};
+    wgpu::RenderPassDescriptor pass_desc = {};
+    pass_desc.colorAttachmentCount = 1;
+    pass_desc.colorAttachments = &att;
+    wgpu::RenderPassEncoder pass = g_encoder.BeginRenderPass(&pass_desc);
+    pass.End();
 }
 
-void graphics::set_render_targets(RenderTarget *buffer)
-{
-	graphics_context->context->OMSetRenderTargets(1, &buffer->rt_view, NULL);
+// M4a design §2.2: the ImGui render-pass entry point. LoadOp::Load means
+// this draws on top of whatever the scene pass(es) already wrote to the
+// window view this frame. Contract: begin_ui_pass/end_ui_pass are invoked by
+// the frame-end hook (registered by ui::init, see graphics::set_frame_end_hook),
+// which swap_frames() runs after all scene passes are recorded and before
+// submit/Present. ui::end() is inert and kept only for upstream compatibility.
+wgpu::RenderPassEncoder begin_ui_pass() {
+    ensure_encoder();
+    wgpu::RenderPassColorAttachment att = {};
+    att.view = window_view();
+    att.loadOp = wgpu::LoadOp::Load;
+    att.storeOp = wgpu::StoreOp::Store;
+    wgpu::RenderPassDescriptor pass_desc = {};
+    pass_desc.colorAttachmentCount = 1;
+    pass_desc.colorAttachments = &att;
+    return g_encoder.BeginRenderPass(&pass_desc);
+}
+void end_ui_pass(wgpu::RenderPassEncoder pass) { pass.End(); }
+
+static void (*g_frame_end_hook)() = nullptr;
+void set_frame_end_hook(void (*hook)()) { g_frame_end_hook = hook; }
+
+void swap_frames() {
+    // M4a fix round 1: run before flush_commands() — this is the one place
+    // guaranteed to be after every scene draw_mesh call and every ui::
+    // widget call this frame, and before this frame's commands are
+    // submitted/presented (graphics.h's set_frame_end_hook comment).
+    if (g_frame_end_hook) g_frame_end_hook();
+    flush_commands();
+    if (g_surface_tex_acquired) {
+        g_gpu.surface.Present();
+        g_surface_tex = {};
+        g_surface_tex_acquired = false;
+    }
 }
 
-void graphics::set_render_targets(RenderTarget *buffer, DepthBuffer *depth_buffer)
-{
-	graphics_context->context->OMSetRenderTargets(1, &buffer->rt_view, depth_buffer->ds_view);
+void release() {
+    g_frame_end_hook = nullptr;
+    flush_commands();
+    g_uniform_buffer = nullptr;
+    for (uint32_t i = 0; i < MAX_SLOTS; i++) { g_compute_slots[i] = {}; g_compute_samplers[i] = nullptr; }
+    g_compute_shader = nullptr;
+    g_blend = BlendType::OPAQUE;
+    g_clear3d = {};
+    g_clear2d_f = {};
+    g_clear2d_u = {};
+    // Render-path teardown (risk #7: cached wgpu::RenderPipeline handles must
+    // not silently outlive device teardown).
+    g_pipeline_cache.clear();
+    g_vertex_shader = nullptr;
+    g_pixel_shader = nullptr;
+    g_render_target = {};
+    for (uint32_t i = 0; i < MAX_SLOTS; i++) g_render_slots[i] = {};
+    graphics_context = nullptr;
+    // wgpu C++ handles are refcounted; dropping them tears down the device.
+    g_ctx = {};
+    g_gpu = {};
 }
 
-void graphics::set_render_targets_viewport(RenderTarget *buffers, uint32_t buffer_count, DepthBuffer *depth_buffer)
-{
-	memory::push_temp_state();
-	D3D11_VIEWPORT *viewports = memory::alloc_temp<D3D11_VIEWPORT>(buffer_count);
+// ---- M2a Task 4/5/6 implement these ----
 
-	for (uint32_t i = 0; i < buffer_count; ++i)
-	{
-		viewports[i] = {};
-		viewports[i].Width = (float)buffers[i].width;
-		viewports[i].Height = (float)buffers[i].height;
-		viewports[i].MaxDepth = 1.0f;
-	}
-
-	ID3D11RenderTargetView **rt_views = memory::alloc_temp<ID3D11RenderTargetView *>(buffer_count);
-	for (uint32_t i = 0; i < buffer_count; ++i)
-	{
-		rt_views[i] = buffers[i].rt_view;
-	}
-
-	graphics_context->context->RSSetViewports(buffer_count, viewports);
-	graphics_context->context->OMSetRenderTargets(buffer_count, rt_views, depth_buffer->ds_view);
-
-	memory::pop_temp_state();
+static void fatal(const char *what) {
+    fprintf(stderr, "[graphics] FATAL: %s\n", what);
+    exit(1);
 }
 
-void graphics::set_render_targets_viewport(RenderTarget *buffer, DepthBuffer *depth_buffer)
-{
-	set_viewport(buffer);
-	set_render_targets(buffer, depth_buffer);
+static void warn_once(const char *what) {
+    // one stderr line per distinct stub, first call only (`what` is always a
+    // string literal, so pointer identity is a valid key)
+    static const char *seen[8] = {};
+    for (int i = 0; i < 8; i++) {
+        if (seen[i] == what) return;
+        if (!seen[i]) {
+            seen[i] = what;
+            fprintf(stderr, "[graphics] %s: stub until M3/M5\n", what);
+            return;
+        }
+    }
 }
 
-void graphics::set_render_targets_viewport(RenderTarget *buffer)
-{
-	set_viewport(buffer);
-	set_render_targets(buffer);
+static wgpu::TextureFormat to_wgpu(Format f) {
+    switch (f) {
+        case Format::R32_FLOAT:        return wgpu::TextureFormat::R32Float;
+        case Format::RGBA32_FLOAT:     return wgpu::TextureFormat::RGBA32Float;
+        case Format::R32_UINT:         return wgpu::TextureFormat::R32Uint;
+        case Format::RGBA8_UNORM:      return wgpu::TextureFormat::RGBA8Unorm;
+        case Format::RGBA8_UNORM_SRGB: return wgpu::TextureFormat::RGBA8UnormSrgb;
+        default:                       return wgpu::TextureFormat::Undefined;
+    }
 }
 
-Texture2D graphics::get_texture2D(void *data, uint32_t width, uint32_t height, DXGI_FORMAT format, uint32_t pixel_byte_count)
-{
-	Texture2D texture;
-
-	D3D11_TEXTURE2D_DESC texture_desc = {};
-	texture_desc.Width = width;
-	texture_desc.Height = height;
-	texture_desc.MipLevels = 1;
-	texture_desc.ArraySize = 1;
-	texture_desc.Format = format;
-	texture_desc.SampleDesc.Count = 1;
-	texture_desc.SampleDesc.Quality = 0;
-	// TODO: Maybe not the best Usage flag.
-	texture_desc.Usage = D3D11_USAGE_DEFAULT;
-	texture_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-
-	D3D11_SUBRESOURCE_DATA texture_data = {};
-	texture_data.pSysMem = data;
-	texture_data.SysMemPitch = width * pixel_byte_count;
-
-	D3D11_SUBRESOURCE_DATA *texture_data_ptr = data ? &texture_data : NULL;
-	HRESULT hr = graphics_context->device->CreateTexture2D(&texture_desc, texture_data_ptr, &texture.texture);
-	if (FAILED(hr)) {
-		PRINT_DEBUG("Failed to create 2D texture.");
-		return Texture2D{};
-	}
-
-	D3D11_SHADER_RESOURCE_VIEW_DESC shader_resource_desc = {};
-	shader_resource_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-	shader_resource_desc.Format = format;
-	shader_resource_desc.Texture2D.MipLevels = 1;
-	shader_resource_desc.Texture2D.MostDetailedMip = 0;
-
-	hr = graphics_context->device->CreateShaderResourceView(texture.texture, &shader_resource_desc, &texture.sr_view);
-	if (FAILED(hr)) {
-		PRINT_DEBUG("Failed to create shader resource view.");
-		return Texture2D{};
-	}
-
-	D3D11_UNORDERED_ACCESS_VIEW_DESC unordered_access_desc = {};
-	unordered_access_desc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE2D;
-	unordered_access_desc.Format = format;
-	unordered_access_desc.Texture2D.MipSlice = 0;
-
-	hr = graphics_context->device->CreateUnorderedAccessView(texture.texture, &unordered_access_desc, &texture.ua_view);
-	if (FAILED(hr)) {
-		PRINT_DEBUG("Failed to create unordered access view.");
-		return Texture2D{};
-	}
-
-	texture.width = width;
-	texture.height = height;
-
-	return texture;
+static uint32_t bytes_per_pixel(Format f) {
+    switch (f) {
+        case Format::R32_FLOAT: case Format::R32_UINT: return 4;
+        case Format::RGBA32_FLOAT: return 16;
+        case Format::RGBA8_UNORM: case Format::RGBA8_UNORM_SRGB: return 4;
+        default: return 0;
+    }
 }
 
-Texture3D graphics::get_texture3D(void *data, uint32_t width, uint32_t height, uint32_t depth, DXGI_FORMAT format, uint32_t pixel_byte_count)
-{
-	Texture3D texture;
-
-	D3D11_TEXTURE3D_DESC texture_desc = {};
-	texture_desc.Width = width;
-	texture_desc.Height = height;
-	texture_desc.Depth = depth;	
-	texture_desc.MipLevels = 1;
-	texture_desc.Format = format;
-	// TODO: Maybe not the best Usage flag.
-	texture_desc.Usage = D3D11_USAGE_DEFAULT;
-	texture_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_UNORDERED_ACCESS;
-
-	D3D11_SUBRESOURCE_DATA texture_data = {};
-	texture_data.pSysMem = data;
-	texture_data.SysMemPitch = width * height * pixel_byte_count;
-
-	D3D11_SUBRESOURCE_DATA *texture_data_ptr = data ? &texture_data : NULL;
-	HRESULT hr = graphics_context->device->CreateTexture3D(&texture_desc, texture_data_ptr, &texture.texture);
-	if (FAILED(hr)) {
-		PRINT_DEBUG("Failed to create 3D texture.");
-		return Texture3D{};
-	}
-
-	D3D11_SHADER_RESOURCE_VIEW_DESC shader_resource_desc = {};
-	shader_resource_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE3D;
-	shader_resource_desc.Format = format;
-	shader_resource_desc.Texture3D.MipLevels = 1;
-	shader_resource_desc.Texture3D.MostDetailedMip = 0;
-
-	hr = graphics_context->device->CreateShaderResourceView(texture.texture, &shader_resource_desc, &texture.sr_view);
-	if (FAILED(hr)) {
-		PRINT_DEBUG("Failed to create shader resource view.");
-		return Texture3D{};
-	}
-
-	D3D11_UNORDERED_ACCESS_VIEW_DESC unordered_access_desc = {};
-	unordered_access_desc.ViewDimension = D3D11_UAV_DIMENSION_TEXTURE3D;
-	unordered_access_desc.Format = format;
-	unordered_access_desc.Texture3D.MipSlice = 0;
-	unordered_access_desc.Texture3D.FirstWSlice = 0;
-	unordered_access_desc.Texture3D.WSize = depth;
-
-	hr = graphics_context->device->CreateUnorderedAccessView(texture.texture, &unordered_access_desc, &texture.ua_view);
-	if (FAILED(hr)) {
-		PRINT_DEBUG("Failed to create unordered access view.");
-		return Texture3D{};
-	}
-
-	texture.width = width;
-	texture.height = height;
-	texture.depth = depth;
-
-	return texture;
+ConstantBuffer get_constant_buffer(uint32_t size) {
+    ConstantBuffer cb = {};
+    wgpu::BufferDescriptor desc = {};
+    desc.size = (size + 15u) & ~15u;   // round to 16: uniform binding size floor
+    desc.usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst;
+    cb.buffer = g_ctx.device.CreateBuffer(&desc);
+    cb.size = size;
+    return cb;
 }
 
-Texture2D graphics::load_texture2D(std::string filename)
-{
-	std::wstringstream stream;
-	stream << filename.c_str();
-
-	DirectX::ScratchImage image;
-	DirectX::TexMetadata *metadata = NULL;
-	if (!SUCCEEDED(DirectX::LoadFromTGAFile(stream.str().c_str(), metadata, image))) {
-		PRINT_DEBUG("Failed to load 2D texture.");
-		return Texture2D{};
-	}
-
-	ID3D11Resource *pResource = NULL;
-	if (!SUCCEEDED(DirectX::CreateTexture(graphics_context->device, image.GetImages(), image.GetImageCount(), image.GetMetadata(), &pResource))) {
-		PRINT_DEBUG("Failed to create 2D texture resource.");
-		return Texture2D{};
-	}
-
-	Texture2D texture;
-	texture.texture = (ID3D11Texture2D*)pResource;
-	texture.width = (uint32_t)image.GetMetadata().width;
-	texture.height = (uint32_t)image.GetMetadata().height;
-
-	D3D11_SHADER_RESOURCE_VIEW_DESC shader_resource_desc = {};
-	shader_resource_desc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
-	shader_resource_desc.Format = image.GetMetadata().format;
-	shader_resource_desc.Texture2D.MipLevels = 1;
-	shader_resource_desc.Texture2D.MostDetailedMip = 0;
-
-	if (!SUCCEEDED(graphics_context->device->CreateShaderResourceView(texture.texture, &shader_resource_desc, &texture.sr_view))) {
-		PRINT_DEBUG("Failed to create shader resource view.");
-		return Texture2D{};
-	}
-
-	return texture;
+void update_constant_buffer(ConstantBuffer *buffer, void *data) {
+    // queue.WriteBuffer executes in queue order, i.e. BEFORE any command
+    // buffer submitted later — including dispatches already recorded into
+    // g_encoder but not yet flushed. Flush first so those dispatches see the
+    // buffer contents as they stood when they were recorded (D3D11
+    // Map(WRITE_DISCARD) call-order semantics).
+    if (g_encoder) flush_commands();
+    // Whole-buffer overwrite, like the D3D11 Map(WRITE_DISCARD)+memcpy.
+    g_ctx.queue.WriteBuffer(buffer->buffer, 0, data, buffer->size);
 }
 
-void graphics::save_texture2D(Texture2D *texture, std::string filename)
-{
-	DirectX::ScratchImage image;
-	if (!SUCCEEDED(DirectX::CaptureTexture(graphics_context->device, graphics_context->context, texture->texture, image))) {
-		PRINT_DEBUG("Failed to capture 2D texture.\n");
-		printf("Failed to capture 2D texture.\n");
-		return;
-	}
-
-	std::wstringstream stream;
-	stream << filename.c_str() << ".tga";
-	if (!SUCCEEDED(DirectX::SaveToTGAFile(*image.GetImages(), stream.str().c_str()))) {
-		PRINT_DEBUG("Failed to store 3D texture to specified TGA file.\n");
-		printf("Failed to store 3D texture to specified TGA file.\n");
-		image.Release();
-		return;
-	}
-
-	image.Release();
+void set_constant_buffer(ConstantBuffer *buffer, uint32_t slot) {
+    // The original bound to all 4 stages at `slot`; main.cpp only ever uses
+    // slot 0 (inventory §1). Fork contract: slot 0 == @group(0) @binding(0).
+    assert(slot == 0 && "fork supports constant buffer slot 0 only");
+    g_uniform_buffer = buffer->buffer;
+    g_uniform_size = (buffer->size + 15u) & ~15u;
 }
 
-void graphics::save_texture2D_HDR(Texture2D *texture, std::string filename)
-{
-	DirectX::ScratchImage image;
-	if (!SUCCEEDED(DirectX::CaptureTexture(graphics_context->device, graphics_context->context, texture->texture, image))) {
-		PRINT_DEBUG("Failed to capture 2D HDR texture.\n");
-		printf("Failed to capture 2D HDR texture.\n");
-		return;
-	}
-
-	std::wstringstream stream;
-	stream << filename.c_str() << ".hdr";
-	if (!SUCCEEDED(DirectX::SaveToHDRFile(*image.GetImages(), stream.str().c_str()))) {
-		PRINT_DEBUG("Failed to store 3D texture to specified HDR file.\n");
-		printf("Failed to store 3D texture to specified HDR file.\n");
-		image.Release();
-		return;
-	}
-
-	image.Release();
+StructuredBuffer get_structured_buffer(int element_stride, int num_elements) {
+    StructuredBuffer sb = {};
+    wgpu::BufferDescriptor desc = {};
+    desc.size = (uint64_t)element_stride * (uint64_t)num_elements;
+    desc.usage = wgpu::BufferUsage::Storage | wgpu::BufferUsage::CopyDst |
+                 wgpu::BufferUsage::CopySrc;   // CopySrc: readback path
+    sb.buffer = g_ctx.device.CreateBuffer(&desc);
+    sb.element_stride = (uint32_t)element_stride;
+    sb.num_elements = (uint32_t)num_elements;
+    sb.size = (uint32_t)desc.size;
+    return sb;
 }
 
-void graphics::save_texture3D(Texture3D *texture, std::string filename)
-{
-	DirectX::ScratchImage image;
-	if (!SUCCEEDED(DirectX::CaptureTexture(graphics_context->device, graphics_context->context, texture->texture, image))) {
-		PRINT_DEBUG("Failed to capture 3D texture.\n");
-		printf("Failed to capture 3D texture.\n");
-		return;
-	}
+void update_structured_buffer(StructuredBuffer *buffer, void *data) {
+    // Same queue-order hazard as update_constant_buffer (see comment there).
+    if (g_encoder) flush_commands();
+    g_ctx.queue.WriteBuffer(buffer->buffer, 0, data, buffer->size);
+}
 
-	std::wstringstream wstream;
-	wstream << filename.c_str() << ".dds";
-	if (!SUCCEEDED(DirectX::SaveToDDSFile(image.GetImages(), image.GetImageCount(), image.GetMetadata(), DirectX::DDS_FLAGS_NONE, wstream.str().c_str()))) {
-		PRINT_DEBUG("Failed to store 3D texture to specified file.\n");
-		printf("Failed to store 3D texture to specified file.\n");
-		image.Release();
-		return;
-	}
+static wgpu::Texture make_texture(wgpu::TextureDimension dim, uint32_t w, uint32_t h,
+                                  uint32_t d, Format format) {
+    wgpu::TextureDescriptor desc = {};
+    desc.dimension = dim;
+    desc.size = {w, h, d};
+    desc.format = to_wgpu(format);
+    desc.mipLevelCount = 1;
+    desc.usage = wgpu::TextureUsage::TextureBinding |     // sampled (sr_view)
+                 wgpu::TextureUsage::StorageBinding |     // storage (ua_view)
+                 wgpu::TextureUsage::CopySrc |            // export/readback
+                 wgpu::TextureUsage::CopyDst;             // initial-data upload
+    return g_ctx.device.CreateTexture(&desc);
+}
 
-	std::stringstream stream;
-	stream << filename.c_str() << ".bin";
-	std::ofstream bin_file(stream.str().c_str(), std::ios::out | std::ios::binary);
-	if (bin_file.is_open()) {
-		size_t tex_byte_size = image.GetPixelsSize();
-		uint8_t* raw_data = image.GetPixels();
-        bin_file.write((char*)raw_data, tex_byte_size);
-        bin_file.close();
+Texture2D get_texture2D(void *data, uint32_t width, uint32_t height, Format format,
+                        uint32_t pixel_byte_count) {
+    (void)pixel_byte_count; // format determines the real size
+    Texture2D t = {};
+    t.texture = make_texture(wgpu::TextureDimension::e2D, width, height, 1, format);
+    t.sr_view = t.texture.CreateView();
+    t.ua_view = t.texture.CreateView();
+    t.width = width; t.height = height; t.format = format;
+    if (data) {
+        wgpu::TexelCopyTextureInfo dst = {};
+        dst.texture = t.texture;
+        wgpu::TexelCopyBufferLayout layout = {};
+        layout.bytesPerRow = width * bytes_per_pixel(format);
+        layout.rowsPerImage = height;
+        wgpu::Extent3D extent = {width, height, 1};
+        g_ctx.queue.WriteTexture(&dst, data, (uint64_t)layout.bytesPerRow * height,
+                                 &layout, &extent);
+    }
+    return t;
+}
+
+Texture3D get_texture3D(void *data, uint32_t width, uint32_t height, uint32_t depth,
+                        Format format, uint32_t pixel_byte_count) {
+    (void)pixel_byte_count;
+    Texture3D t = {};
+    t.texture = make_texture(wgpu::TextureDimension::e3D, width, height, depth, format);
+    t.sr_view = t.texture.CreateView();
+    t.ua_view = t.texture.CreateView();
+    t.width = width; t.height = height; t.depth = depth; t.format = format;
+    if (data) {
+        wgpu::TexelCopyTextureInfo dst = {};
+        dst.texture = t.texture;
+        wgpu::TexelCopyBufferLayout layout = {};
+        layout.bytesPerRow = width * bytes_per_pixel(format);
+        layout.rowsPerImage = height;
+        wgpu::Extent3D extent = {width, height, depth};
+        g_ctx.queue.WriteTexture(&dst, data,
+                                 (uint64_t)layout.bytesPerRow * height * depth,
+                                 &layout, &extent);
+    }
+    // NOTE the original leaves data==NULL textures uninitialized; WebGPU
+    // zero-initializes. That is a (beneficial) difference: the original relied
+    // on main.cpp clearing before use anyway (inventory §2). Nothing to do.
+    return t;
+}
+
+DepthBuffer get_depth_buffer(uint32_t width, uint32_t height) {
+    // Created by main.cpp but never bound (inventory §4) — real texture, inert.
+    DepthBuffer db = {};
+    wgpu::TextureDescriptor desc = {};
+    desc.size = {width, height, 1};
+    desc.format = wgpu::TextureFormat::Depth24PlusStencil8;
+    desc.usage = wgpu::TextureUsage::RenderAttachment;
+    db.texture = g_ctx.device.CreateTexture(&desc);
+    db.ds_view = db.texture.CreateView();
+    db.width = width; db.height = height;
+    return db;
+}
+
+TextureSampler get_texture_sampler(SampleMode mode, Filter filter) {
+    TextureSampler s = {};
+    wgpu::SamplerDescriptor desc = {};
+    wgpu::AddressMode am = mode == WRAP ? wgpu::AddressMode::Repeat
+                        : wgpu::AddressMode::ClampToEdge; // BORDER: WebGPU has no
+    // border color sampler in core; CLAMP is the closest. main.cpp only uses
+    // CLAMP (inventory §1), so this is unreachable-in-practice.
+    desc.addressModeU = am; desc.addressModeV = am; desc.addressModeW = am;
+    if (filter == Filter::POINT) {
+        desc.magFilter = wgpu::FilterMode::Nearest;
+        desc.minFilter = wgpu::FilterMode::Nearest;
+        desc.mipmapFilter = wgpu::MipmapFilterMode::Nearest;
+    } else {
+        desc.magFilter = wgpu::FilterMode::Linear;
+        desc.minFilter = wgpu::FilterMode::Linear;
+        desc.mipmapFilter = wgpu::MipmapFilterMode::Linear;
+        if (filter == Filter::ANISOTROPIC) desc.maxAnisotropy = 16;
+    }
+    s.sampler = g_ctx.device.CreateSampler(&desc);
+    return s;
+}
+
+Texture2D load_texture2D(std::string filename) {
+    int w = 0, h = 0, n = 0;
+    unsigned char *pixels = stbi_load(filename.c_str(), &w, &h, &n, 4); // force RGBA
+    if (!pixels) {
+        char msg[512];
+        snprintf(msg, sizeof(msg), "load_texture2D: cannot load %s (%s)",
+                 filename.c_str(), stbi_failure_reason());
+        fatal(msg);   // palette missing == packaging error; fail loud like shader loads
+    }
+    // RGBA8_UNORM, not _SRGB: adjudicated 2026-08-12 — plain truecolor LUT data,
+    // verified by screenshot-compare at the M4b human gate (deviations = gate findings).
+    Texture2D t = get_texture2D(pixels, (uint32_t)w, (uint32_t)h, Format::RGBA8_UNORM);
+    stbi_image_free(pixels);
+    return t;
+}
+
+uint16_t f32_to_f16(float v) {
+    // Apple clang's _Float16 is hardware IEEE 754 binary16 with
+    // round-to-nearest-even — the same rounding upstream's R16F texture
+    // applied on every GPU store. The port stores r32float and converts once
+    // at export instead (QUIRK(r16f_channel_truncation), main.cpp), so
+    // quantization matches upstream's pipeline stage-for-stage in rounding
+    // behavior. Inf/NaN/subnormals are defined by the _Float16 conversion;
+    // nothing handled specially (design §3.4).
+    _Float16 h = (_Float16)v;
+    uint16_t bits;
+    memcpy(&bits, &h, sizeof(bits));
+    return bits;
+}
+
+void save_texture3D(Texture3D *texture, std::string filename) {
+    // M5 (F6 export): GPU->CPU readback of the r32float 3D texture, CPU
+    // f32->f16 conversion, single write of upstream's byte format — headerless
+    // raw binary16, tightly packed, X fastest / Y next / Z slowest
+    // (index = z*W*H + y*W + x; DirectXTex ScratchImage layout). The upstream
+    // .dds sibling is dropped (port design decision). No endianness handling:
+    // both platforms little-endian, upstream never byte-swapped. `filename`
+    // arrives extension-less ("export/deposit", "export/trace"); ".bin" is
+    // appended here. Like upstream, no directory is created — bin/export/
+    // ships with the repo.
+    if (texture->format != Format::R32_FLOAT) {
+        // Only format the port's exportable textures use (main.cpp trail/trace
+        // creation). Loud skip, not silent garbage (design §3.1).
+        fprintf(stderr, "[graphics] save_texture3D: unsupported format, skipping %s\n",
+                filename.c_str());
+        return;
+    }
+    const uint32_t width = texture->width, height = texture->height,
+                   depth = texture->depth;
+    const uint32_t unpadded_bytes_per_row = width * 4;
+    // Dawn's 256 B bytesPerRow rule for texture->buffer copies (same as
+    // tests/render_path_tests.cpp readback helpers).
+    const uint32_t padded_bytes_per_row = (unpadded_bytes_per_row + 255u) & ~255u;
+    const uint64_t buffer_size = (uint64_t)padded_bytes_per_row * height * depth;
+
+    // Transient readback buffer, created and destroyed per call — F6 is a
+    // rare user action; no caching (design §3.2). ~2.5 GB at the native VAC
+    // grid; device maxBufferSize is requested at the adapter maximum in
+    // gpu_context.cpp precisely for this.
+    wgpu::BufferDescriptor desc = {};
+    desc.size = buffer_size;
+    desc.usage = wgpu::BufferUsage::MapRead | wgpu::BufferUsage::CopyDst;
+    wgpu::Buffer readback = g_ctx.device.CreateBuffer(&desc);
+
+    // Copy -> flush -> MapAsync -> blocking ProcessEvents pump: the exact
+    // capture_structured_buffer idiom. Synchronous same-frame stall is the
+    // established, deliberate convention (D3D11 Map(READ) parity).
+    ensure_encoder();
+    wgpu::TexelCopyTextureInfo src = {};
+    src.texture = texture->texture;
+    wgpu::TexelCopyBufferInfo dst = {};
+    dst.buffer = readback;
+    dst.layout.bytesPerRow = padded_bytes_per_row;
+    dst.layout.rowsPerImage = height;
+    wgpu::Extent3D extent = {width, height, depth};
+    g_encoder.CopyTextureToBuffer(&src, &dst, &extent);
+    flush_commands();
+
+    bool done = false;
+    readback.MapAsync(
+        wgpu::MapMode::Read, 0, buffer_size, wgpu::CallbackMode::AllowProcessEvents,
+        [&done](wgpu::MapAsyncStatus status, wgpu::StringView message) {
+            if (status != wgpu::MapAsyncStatus::Success)
+                fprintf(stderr, "[graphics] save_texture3D map failed: %.*s\n",
+                        (int)message.length, message.data);
+            done = true;
+        });
+    wait_for(&done);
+    const uint8_t *mapped = (const uint8_t *)readback.GetConstMappedRange(0, buffer_size);
+    if (!mapped) {
+        fprintf(stderr, "[graphics] save_texture3D: no mapped data, skipping %s\n",
+                filename.c_str());
+        readback.Unmap();
+        return;
     }
 
-	image.Release();
-}
-
-uint32_t graphics::capture_current_frame()
-{
-	ID3D11Texture2D* pBuffer;
-	swap_chain->swap_chain->GetBuffer(0, __uuidof(ID3D11Texture2D), (LPVOID*)&pBuffer);
-
-	Texture2D texture_to_save;
-	D3D11_TEXTURE2D_DESC td;
-	pBuffer->GetDesc(&td);
-	graphics_context->device->CreateTexture2D(&td, NULL, &texture_to_save.texture);
-	graphics_context->context->CopyResource(texture_to_save.texture, pBuffer);
-
-	static uint32_t count = 0;
-	std::stringstream stream;
-	stream << "capture\\frame" << count++;
-	printf("Capturing %s\n", stream.str().c_str());
-	save_texture2D(&texture_to_save, stream.str());
-
-	RELEASE_DX_RESOURCE(texture_to_save.texture);
-	return count-1;
-}
-
-void graphics::set_texture(RenderTarget *buffer, uint32_t slot)
-{
-	graphics_context->context->PSSetShaderResources(slot, 1, &buffer->sr_view);
-}
-
-void graphics::set_texture(DepthBuffer *buffer, uint32_t slot)
-{
-	graphics_context->context->PSSetShaderResources(slot, 1, &buffer->sr_view);
-}
-
-void graphics::set_texture(Texture2D *texture, uint32_t slot)
-{
-	graphics_context->context->PSSetShaderResources(slot, 1, &texture->sr_view);
-}
-
-void graphics::set_texture(Texture3D *texture, uint32_t slot)
-{
-	graphics_context->context->PSSetShaderResources(slot, 1, &texture->sr_view);
-}
-
-void graphics::unset_texture(uint32_t slot)
-{
-	ID3D11ShaderResourceView *null[] = { NULL };
-	graphics_context->context->PSSetShaderResources(slot, 1, null);
-}
-
-void graphics::set_texture_compute(Texture2D *texture, uint32_t slot)
-{
-	UINT init_counts = 0;
-	graphics_context->context->CSSetUnorderedAccessViews(slot, 1, &texture->ua_view, &init_counts);
-}
-
-void graphics::set_texture_sampled_compute(Texture2D *texture, uint32_t slot)
-{
-	graphics_context->context->CSSetShaderResources(slot, 1, &texture->sr_view);
-}
-
-void graphics::set_texture_compute(Texture3D *texture, uint32_t slot)
-{
-	UINT init_counts = 0;
-	graphics_context->context->CSSetUnorderedAccessViews(slot, 1, &texture->ua_view, &init_counts);
-}
-
-void graphics::set_texture_sampled_compute(Texture3D *texture, uint32_t slot)
-{
-	graphics_context->context->CSSetShaderResources(slot, 1, &texture->sr_view);
-}
-
-void graphics::unset_texture_compute(uint32_t slot)
-{
-	UINT init_counts = 0;
-	ID3D11UnorderedAccessView *null[] = { NULL };
-	graphics_context->context->CSSetUnorderedAccessViews(slot, 1, null, &init_counts);
-}
-
-void graphics::unset_texture_sampled_compute(uint32_t slot)
-{
-	ID3D11ShaderResourceView *null[] = { NULL };
-	graphics_context->context->CSSetShaderResources(slot, 1, null);
-}
-
-void graphics::set_blend_state(BlendType type)
-{
-	current_blend_type = type;
-	float blend_factor[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-	graphics_context->context->OMSetBlendState(blend_states[current_blend_type], blend_factor, 0xffffffff);
-}
-
-BlendType graphics::get_blend_state()
-{
-	return current_blend_type;
-}
-
-void graphics::set_rasterizer_state(RasterType type)
-{
-	current_raster_type = type;
-	graphics_context->context->RSSetState(raster_states[current_raster_type]);
-}
-
-RasterType graphics::get_rasterizer_state()
-{
-	return current_raster_type;
-}
-
-D3D11_TEXTURE_ADDRESS_MODE m2m[3] =
-{
-	D3D11_TEXTURE_ADDRESS_CLAMP,
-	D3D11_TEXTURE_ADDRESS_WRAP,
-	D3D11_TEXTURE_ADDRESS_BORDER
-};
-
-TextureSampler graphics::get_texture_sampler(SampleMode mode, D3D11_FILTER filter)
-{
-	TextureSampler sampler;
-
-	D3D11_TEXTURE_ADDRESS_MODE address_mode = m2m[mode];
-	D3D11_SAMPLER_DESC sampler_desc = {};
-	sampler_desc.Filter = filter;
-	sampler_desc.AddressU = address_mode;
-	sampler_desc.AddressV = address_mode;
-	sampler_desc.AddressW = address_mode;
-	sampler_desc.ComparisonFunc = D3D11_COMPARISON_NEVER;
-	sampler_desc.MinLOD = -D3D11_FLOAT32_MAX;
-	sampler_desc.MaxLOD = D3D11_FLOAT32_MAX;
-	HRESULT hr = graphics_context->device->CreateSamplerState(&sampler_desc, &sampler.sampler);
-	if(FAILED(hr)) {
-		return TextureSampler{};
-	}
-
-	return sampler;
-}
-
-void graphics::set_texture_sampler(TextureSampler *sampler, uint32_t slot) 
-{
-	graphics_context->context->PSSetSamplers(slot, 1, &sampler->sampler);
-}
-
-void graphics::set_texture_sampler_compute(TextureSampler *sampler, uint32_t slot) 
-{
-	graphics_context->context->CSSetSamplers(slot, 1, &sampler->sampler);
-}
-
-
-Mesh graphics::get_mesh(void *vertices, uint32_t vertex_count, uint32_t vertex_stride, void *indices, uint32_t index_count, uint32_t index_byte_size, D3D11_PRIMITIVE_TOPOLOGY topology)
-{
-	Mesh mesh = {};
-	
-	D3D11_BUFFER_DESC vertex_buffer_desc = {};
-	vertex_buffer_desc.ByteWidth = vertex_count * vertex_stride;
-	vertex_buffer_desc.Usage = D3D11_USAGE_IMMUTABLE;
-	vertex_buffer_desc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-
-	D3D11_SUBRESOURCE_DATA vertex_buffer_data = {};
-	vertex_buffer_data.pSysMem = vertices;
-	vertex_buffer_data.SysMemPitch = vertex_stride;
-
-	HRESULT hr = graphics_context->device->CreateBuffer(&vertex_buffer_desc, &vertex_buffer_data, &mesh.vertex_buffer);
-	if (FAILED(hr)) {
-		PRINT_DEBUG("Failed to create vertex buffer.");
-		return Mesh{};
-	}
-
-	if (indices && index_count > 0)
-	{
-		D3D11_BUFFER_DESC index_buffer_desc = {};
-		index_buffer_desc.ByteWidth = index_count * index_byte_size;
-		index_buffer_desc.Usage = D3D11_USAGE_IMMUTABLE;
-		index_buffer_desc.BindFlags = D3D11_BIND_INDEX_BUFFER;
-
-		D3D11_SUBRESOURCE_DATA index_buffer_data = {};
-		index_buffer_data.pSysMem = indices;
-		index_buffer_data.SysMemPitch = index_byte_size;
-
-		hr = graphics_context->device->CreateBuffer(&index_buffer_desc, &index_buffer_data, &mesh.index_buffer);
-		if (FAILED(hr)) {
-			PRINT_DEBUG("Failed to create index buffer.");
-			return Mesh{};
-		}
-	}
-
-	mesh.vertex_stride = vertex_stride;
-	mesh.vertex_offset = 0;
-	mesh.vertex_count = vertex_count;
-	mesh.index_count = index_count;
-	mesh.index_format = index_byte_size == 2 ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT;
-	mesh.topology = topology;
-
-	return mesh;
-}
-
-void graphics::draw_mesh(Mesh *mesh)
-{
-	graphics_context->context->IASetVertexBuffers(0, 1, &mesh->vertex_buffer, &mesh->vertex_stride, &mesh->vertex_offset);
-
-	graphics_context->context->IASetPrimitiveTopology(mesh->topology);
-	if(mesh->index_buffer) {
-		graphics_context->context->IASetIndexBuffer(mesh->index_buffer, mesh->index_format, 0);
-		graphics_context->context->DrawIndexed(mesh->index_count, 0, 0);
-	} else {
-		graphics_context->context->Draw(mesh->vertex_count, 0);
-	}
-}
-
-ConstantBuffer graphics::get_constant_buffer(uint32_t size)
-{
-	ConstantBuffer buffer = {};
-	buffer.size = size;
-
-	D3D11_BUFFER_DESC constant_buffer_desc = {};
-	constant_buffer_desc.ByteWidth = size;
-	constant_buffer_desc.Usage = D3D11_USAGE_DYNAMIC;
-	constant_buffer_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-	constant_buffer_desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-
-	graphics_context->device->CreateBuffer(&constant_buffer_desc, NULL, &buffer.buffer);
-
-	return buffer;
-}
-
-StructuredBuffer graphics::get_structured_buffer(int element_stride, int num_elements)
-{
-	StructuredBuffer buffer = {};
-	buffer.size = element_stride * num_elements;
-
-	D3D11_BUFFER_DESC constant_buffer_desc = {};
-	constant_buffer_desc.ByteWidth = element_stride * num_elements;
-	constant_buffer_desc.Usage = D3D11_USAGE_DEFAULT;
-	constant_buffer_desc.BindFlags = D3D11_BIND_UNORDERED_ACCESS;// | D3D11_BIND_SHADER_RESOURCE;
-	constant_buffer_desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ | D3D11_CPU_ACCESS_WRITE;
-	constant_buffer_desc.MiscFlags = D3D11_RESOURCE_MISC_BUFFER_STRUCTURED;
-	constant_buffer_desc.StructureByteStride = element_stride;
-
-	HRESULT hr = graphics_context->device->CreateBuffer(&constant_buffer_desc, NULL, &buffer.buffer);
-	if (FAILED(hr)) {
-		PRINT_DEBUG("Failed to create buffer.");
-		return StructuredBuffer{};
-	}
-
-	D3D11_UNORDERED_ACCESS_VIEW_DESC unordered_access_desc = {};
-	unordered_access_desc.ViewDimension = D3D11_UAV_DIMENSION_BUFFER;
-	unordered_access_desc.Format = DXGI_FORMAT_UNKNOWN;
-	unordered_access_desc.Buffer.FirstElement = 0;
-	unordered_access_desc.Buffer.Flags = 0;
-	unordered_access_desc.Buffer.NumElements = num_elements;
-
-	hr = graphics_context->device->CreateUnorderedAccessView(buffer.buffer, &unordered_access_desc, &buffer.ua_view);
-	if (FAILED(hr)) {
-		PRINT_DEBUG("Failed to create unordered access view.");
-		return StructuredBuffer{};
-	}
-
-	return buffer;
-}
-
-void graphics::capture_structured_buffer(StructuredBuffer *buffer, void *mapped_data, unsigned int num_elements, size_t element_size)
-{
-	D3D11_MAPPED_SUBRESOURCE ms;
-	if (!SUCCEEDED(graphics_context->context->Map(buffer->buffer, 0, D3D11_MAP_READ, 0, &ms))) {
-		PRINT_DEBUG("Failed to map GPU buffer.");
-		return;
-	}
-	memcpy(mapped_data, ms.pData, num_elements * element_size);
-	graphics_context->context->Unmap(buffer->buffer, 0);
-}
-
-void graphics::update_constant_buffer(ConstantBuffer *buffer, void *data)
-{
-	D3D11_MAPPED_SUBRESOURCE mapped_buffer;
-	graphics_context->context->Map(buffer->buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped_buffer);
-	memcpy(mapped_buffer.pData, data, buffer->size);
-	graphics_context->context->Unmap(buffer->buffer, 0);
-}
-
-void graphics::update_structured_buffer(StructuredBuffer *buffer, void *data)
-{
-	graphics_context->context->UpdateSubresource(buffer->buffer, 0, NULL, data, 0, 0);
-}
-
-void graphics::set_constant_buffer(ConstantBuffer *buffer, uint32_t slot)
-{
-	graphics_context->context->PSSetConstantBuffers(slot, 1, &buffer->buffer);
-	graphics_context->context->GSSetConstantBuffers(slot, 1, &buffer->buffer);
-	graphics_context->context->VSSetConstantBuffers(slot, 1, &buffer->buffer);
-	graphics_context->context->CSSetConstantBuffers(slot, 1, &buffer->buffer);
-}
-
-void graphics::set_structured_buffer(StructuredBuffer *buffer, uint32_t slot)
-{
-	UINT init_counts = 0;
-	graphics_context->context->CSSetUnorderedAccessViews(slot, 1, &buffer->ua_view, &init_counts);
-}
-
-CompiledShader compile_shader(void *source, uint32_t source_size, char *target)
-{
-	CompiledShader compiled_shader;
-
-	uint32_t flags = D3DCOMPILE_PACK_MATRIX_COLUMN_MAJOR;// | D3DCOMPILE_OPTIMIZATION_LEVEL3;
-#ifdef DEBUG
-	flags |= D3DCOMPILE_DEBUG;
-#endif
-	ID3DBlob *error_msg;
-	HRESULT hr = D3DCompile(source, source_size, NULL, NULL, NULL, "main", target, flags, NULL, &compiled_shader.blob, &error_msg);
-	if (FAILED(hr)) {
-		PRINT_DEBUG("Failed to compile shader!");
-		if (error_msg) {
-			PRINT_DEBUG((char *)error_msg->GetBufferPointer());
-			error_msg->Release();
-		}
-		return CompiledShader{};
-	}
-
-	return compiled_shader;
-}
-
-CompiledShader graphics::compile_vertex_shader(void *source, uint32_t source_size)
-{
-	CompiledShader vertex_shader = compile_shader(source, source_size, "vs_5_0");
-	return vertex_shader;
-}
-
-CompiledShader graphics::compile_pixel_shader(void *source, uint32_t source_size)
-{
-	CompiledShader pixel_shader = compile_shader(source, source_size, "ps_5_0");
-	return pixel_shader;
-}
-
-CompiledShader graphics::compile_geometry_shader(void *source, uint32_t source_size)
-{
-	CompiledShader geometry_shader = compile_shader(source, source_size, "gs_5_0");
-	return geometry_shader;
-}
-
-CompiledShader graphics::compile_compute_shader(void *source, uint32_t source_size)
-{
-	CompiledShader compute_shader = compile_shader(source, source_size, "cs_5_0");
-	return compute_shader;
-}
-
-VertexShader graphics::get_vertex_shader(CompiledShader *compiled_shader, VertexInputDesc *vertex_input_descs, uint32_t vertex_input_count) 
-{
-	VertexShader vertex_shader = graphics::get_vertex_shader(compiled_shader->blob->GetBufferPointer(),
-															 (uint32_t)compiled_shader->blob->GetBufferSize(),
-															 vertex_input_descs, vertex_input_count);
-	return vertex_shader;
-}
-
-VertexShader graphics::get_vertex_shader(void *shader_byte_code, uint32_t shader_size, VertexInputDesc *vertex_input_descs, uint32_t vertex_input_count)
-{
-	memory::push_temp_state();
-
-	VertexShader shader = {};
-	HRESULT hr = graphics_context->device->CreateVertexShader(shader_byte_code, shader_size, NULL, &shader.vertex_shader);
-	if (FAILED(hr)) {
-		PRINT_DEBUG("Failed to create vertex shader.");
-		return VertexShader{};
-	}
-
-	D3D11_INPUT_ELEMENT_DESC *input_layout_desc = memory::alloc_temp<D3D11_INPUT_ELEMENT_DESC>(vertex_input_count);
-	for (uint32_t i = 0; i < vertex_input_count; ++i)
-	{
-		input_layout_desc[i] = {};
-		input_layout_desc[i].SemanticName = vertex_input_descs[i].semantic_name;
-		input_layout_desc[i].Format = vertex_input_descs[i].format;
-		input_layout_desc[i].AlignedByteOffset = D3D11_APPEND_ALIGNED_ELEMENT;
-	}
-
-	hr = graphics_context->device->CreateInputLayout(input_layout_desc, vertex_input_count, shader_byte_code, shader_size, &shader.input_layout);
-	if (FAILED(hr)) {
-		PRINT_DEBUG("Failed to create input layout.");
-		return VertexShader{};
-	}
-
-	memory::pop_temp_state();
-	return shader;
-}
-
-void graphics::set_vertex_shader(VertexShader *shader)
-{
-	graphics_context->context->IASetInputLayout(shader->input_layout);
-	graphics_context->context->VSSetShader(shader->vertex_shader, NULL, 0);
-}
-
-PixelShader graphics::get_pixel_shader(CompiledShader *compiled_shader)
-{
-	PixelShader pixel_shader = graphics::get_pixel_shader(compiled_shader->blob->GetBufferPointer(),
-														  (uint32_t)compiled_shader->blob->GetBufferSize());
-	return pixel_shader;
-}
-
-PixelShader graphics::get_pixel_shader(void *shader_byte_code, uint32_t shader_size)
-{
-	PixelShader shader = {};
-
-	HRESULT hr = graphics_context->device->CreatePixelShader(shader_byte_code, shader_size, NULL, &shader.pixel_shader);
-	if (FAILED(hr)) {
-		PRINT_DEBUG("Failed to create pixel shader.");
-		return PixelShader{};
-	}
-	
-	return shader;
-}
-
-void graphics::set_pixel_shader()
-{
-	graphics_context->context->PSSetShader(NULL, NULL, 0);
-}
-
-void graphics::set_pixel_shader(PixelShader *shader)
-{
-	graphics_context->context->PSSetShader(shader->pixel_shader, NULL, 0);
-}
-
-GeometryShader graphics::get_geometry_shader(CompiledShader *compiled_shader)
-{
-	GeometryShader geometry_shader = graphics::get_geometry_shader(compiled_shader->blob->GetBufferPointer(),
-																   (uint32_t) compiled_shader->blob->GetBufferSize());
-	return geometry_shader;
-}
-
-GeometryShader graphics::get_geometry_shader(void *shader_byte_code, uint32_t shader_size)
-{
-	GeometryShader shader = {};
-
-	HRESULT hr = graphics_context->device->CreateGeometryShader(shader_byte_code, shader_size, NULL, &shader.geometry_shader);
-	if (FAILED(hr)) {
-		PRINT_DEBUG("Failed to create geometry shader.");
-		return GeometryShader{};
-	}
-
-	return shader;
-}
-
-void graphics::set_geometry_shader()
-{
-	graphics_context->context->GSSetShader(NULL, NULL, 0);
-}
-
-void graphics::set_geometry_shader(GeometryShader *shader)
-{
-	graphics_context->context->GSSetShader(shader->geometry_shader, NULL, 0);
-}
-
-ComputeShader graphics::get_compute_shader(CompiledShader *compiled_shader)
-{
-	ComputeShader compute_shader = graphics::get_compute_shader(compiled_shader->blob->GetBufferPointer(),
-																(uint32_t) compiled_shader->blob->GetBufferSize());
-	return compute_shader;
-}
-
-ComputeShader graphics::get_compute_shader(void *shader_byte_code, uint32_t shader_size)
-{
-	ComputeShader shader = {};
-
-	HRESULT hr = graphics_context->device->CreateComputeShader(shader_byte_code, shader_size, NULL, &shader.compute_shader);
-	if (FAILED(hr)) {
-		PRINT_DEBUG("Failed to create compute shader.");
-		return ComputeShader{};
-	}
-
-	return shader;
-}
-
-void graphics::set_compute_shader()
-{
-	graphics_context->context->CSSetShader(NULL, NULL, 0);
-}
-
-void graphics::set_compute_shader(ComputeShader *shader)
-{
-	graphics_context->context->CSSetShader(shader->compute_shader, NULL, 0);
-}
-
-void graphics::run_compute(int group_x, int group_y, int group_z)
-{
-	graphics_context->context->Dispatch(group_x, group_y, group_z);
-}
-
-
-void graphics::swap_frames()
-{
-	swap_chain->swap_chain->Present(1, 0);
-}
-
-void graphics::show_live_objects()
-{
-	ID3D11Debug *debug_device;
-	graphics_context->device->QueryInterface(__uuidof(ID3D11Debug), reinterpret_cast<void**>(&debug_device));
-	debug_device->ReportLiveDeviceObjects(D3D11_RLDO_DETAIL);
-}
-
-// is_ready functions
-
-bool graphics::is_ready(Texture2D *texture)
-{
-	return texture->texture && texture->sr_view;
-}
-
-bool graphics::is_ready(Texture3D *texture)
-{
-	return texture->texture && texture->sr_view;
-}
-
-bool graphics::is_ready(RenderTarget *render_target)
-{
-	return render_target->rt_view && render_target->texture;
-}
-
-bool graphics::is_ready(DepthBuffer *depth_buffer)
-{
-	return depth_buffer->ds_view && depth_buffer->sr_view && depth_buffer->texture;
-}
-
-bool graphics::is_ready(Mesh *mesh)
-{
-	return mesh->vertex_buffer && mesh->index_buffer;
-}
-
-bool graphics::is_ready(ConstantBuffer *buffer)
-{
-	return buffer->buffer;
-}
-
-bool graphics::is_ready(TextureSampler *sampler)
-{
-	return sampler->sampler;
-}
-
-bool graphics::is_ready(VertexShader *shader)
-{
-	return shader->vertex_shader && shader->input_layout;
-}
-
-bool graphics::is_ready(PixelShader *shader)
-{
-	return shader->pixel_shader;
-}
-
-bool graphics::is_ready(ComputeShader *shader)
-{
-	return shader->compute_shader;
-}
-
-bool graphics::is_ready(CompiledShader *shader)
-{
-	return shader->blob;
-}
-
-// release functions
-void graphics::release()
-{
-	RELEASE_DX_RESOURCE(swap_chain->swap_chain);
-	RELEASE_DX_RESOURCE(graphics_context->context);
-	RELEASE_DX_RESOURCE(graphics_context->device);
-	RELEASE_DX_RESOURCE(blend_states[BlendType::OPAQUE]);
-	RELEASE_DX_RESOURCE(blend_states[BlendType::ALPHA]);
-	RELEASE_DX_RESOURCE(raster_states[RasterType::SOLID]);
-	RELEASE_DX_RESOURCE(raster_states[RasterType::WIREFRAME]);
-}
-
-void graphics::release(RenderTarget *buffer)
-{
-	RELEASE_DX_RESOURCE(buffer->rt_view);
-	RELEASE_DX_RESOURCE(buffer->sr_view);
-	RELEASE_DX_RESOURCE(buffer->texture);
-}
-
-void graphics::release(DepthBuffer *buffer)
-{
-	RELEASE_DX_RESOURCE(buffer->ds_view);
-	RELEASE_DX_RESOURCE(buffer->sr_view);
-	RELEASE_DX_RESOURCE(buffer->texture);
-}
-
-void graphics::release(Texture2D *texture)
-{
-	RELEASE_DX_RESOURCE(texture->sr_view);
-	RELEASE_DX_RESOURCE(texture->ua_view);
-	RELEASE_DX_RESOURCE(texture->texture);
-}
-
-void graphics::release(Texture3D *texture)
-{
-	RELEASE_DX_RESOURCE(texture->sr_view);
-	RELEASE_DX_RESOURCE(texture->ua_view);
-	RELEASE_DX_RESOURCE(texture->texture);
-}
-
-void graphics::release(Mesh *mesh)
-{
-	RELEASE_DX_RESOURCE(mesh->vertex_buffer);
-	RELEASE_DX_RESOURCE(mesh->index_buffer);
-}
-
-void graphics::release(VertexShader *shader)
-{
-	RELEASE_DX_RESOURCE(shader->vertex_shader);
-	RELEASE_DX_RESOURCE(shader->input_layout);
-}
-
-void graphics::release(GeometryShader *shader)
-{
-	RELEASE_DX_RESOURCE(shader->geometry_shader);
-}
-
-void graphics::release(PixelShader *shader)
-{
-	RELEASE_DX_RESOURCE(shader->pixel_shader);
-}
-
-void graphics::release(ComputeShader *shader)
-{
-	RELEASE_DX_RESOURCE(shader->compute_shader);
-}
-
-void graphics::release(ConstantBuffer *buffer)
-{
-	RELEASE_DX_RESOURCE(buffer->buffer);
-}
-
-void graphics::release(StructuredBuffer *buffer)
-{
-	RELEASE_DX_RESOURCE(buffer->buffer);
-	RELEASE_DX_RESOURCE(buffer->ua_view);
-}
-
-void graphics::release(TextureSampler *sampler)
-{
-	RELEASE_DX_RESOURCE(sampler->sampler);
-}
-
-void graphics::release(CompiledShader *shader)
-{
-	RELEASE_DX_RESOURCE(shader->blob);
-}
-
-////////////////////////////////////////////////
-/// HIGHER LEVEL API
-////////////////////////////////////////////////
-
-uint32_t graphics::get_vertex_input_desc_from_shader(char *vertex_string, uint32_t size, VertexInputDesc * vertex_input_descs)
-{
-	const char *struct_name = "VertexInput";
-	char *c = vertex_string;
-	enum State
-	{
-		SEARCHING,
-		PARSING_TYPE,
-		SKIPPING_NAME,
-		PARSING_SEMANTIC_NAME
-	};
-
-	State state = SEARCHING;
-	uint32_t type_length = 0;
-	uint32_t semantic_name_length = 0;
-	uint32_t type = 0;
-
-#define SHADER_TYPE_FLOAT4 0
-#define SHADER_TYPE_FLOAT2 1
-#define SHADER_TYPE_FLOAT3 2
-
-	char *types[] =
-	{
-		"float4", "float2", "float3", "int4"
-	};
-
-	DXGI_FORMAT formats[]
-	{
-		DXGI_FORMAT_R32G32B32A32_FLOAT, DXGI_FORMAT_R32G32_FLOAT, DXGI_FORMAT_R32G32B32_FLOAT, DXGI_FORMAT_R32G32B32A32_SINT
-	};
-
-	uint32_t i = 0;
-	uint32_t vertex_input_count = 0;
-
-	while (i < size)
-	{
-		switch (state)
-		{
-		case SEARCHING:
-		{
-			if (strncmp(c, struct_name, strlen(struct_name)) == 0)
-			{
-				state = PARSING_TYPE;
-				i += (uint32_t)strlen(struct_name);
-				c += (uint32_t)strlen(struct_name);
-			}
-		}
-		break;
-		case PARSING_TYPE:
-		{
-			if (*c == ' ' && type_length > 0)
-			{
-				for (uint32_t j = 0; j < ARRAYSIZE(types); ++j)
-				{
-					if (strncmp(c - type_length, types[j], type_length) == 0)
-					{
-						type = j;
-
-						state = SKIPPING_NAME;
-						type_length = 0;
-
-						break;
-					}
-				}
-			}
-			else if (isalnum(*c))
-			{
-				type_length++;
-			}
-		}
-		break;
-		case SKIPPING_NAME:
-		{
-			if (*c == ':')
-			{
-				state = PARSING_SEMANTIC_NAME;
-			}
-		}
-		break;
-		case PARSING_SEMANTIC_NAME:
-		{
-			if ((isspace(*c) || *c == ';') && semantic_name_length > 0)
-			{
-				assert(semantic_name_length < MAX_SEMANTIC_NAME_LENGTH);
-				if (vertex_input_descs)
-				{
-					vertex_input_descs[vertex_input_count].format = formats[type];
-					memcpy(vertex_input_descs[vertex_input_count].semantic_name, c - semantic_name_length, semantic_name_length);
-					vertex_input_descs[vertex_input_count].semantic_name[semantic_name_length] = 0;
-				}
-				vertex_input_count++;
-
-				state = PARSING_TYPE;
-				semantic_name_length = 0;
-			}
-			else if (isalnum(*c) || *c == '_')
-			{
-				semantic_name_length++;
-			}
-		}
-		}
-		++c; ++i;
-	}
-
-	return vertex_input_count;
-}
+    // De-pad each row and convert f32->f16 while re-packing into the tight
+    // Z-major output (design §3.3).
+    std::vector<uint16_t> out((size_t)width * height * depth);
+    for (uint32_t z = 0; z < depth; ++z) {
+        for (uint32_t y = 0; y < height; ++y) {
+            const float *row = (const float *)(mapped
+                + (uint64_t)z * padded_bytes_per_row * height
+                + (uint64_t)y * padded_bytes_per_row);
+            uint16_t *dst_row = out.data() + ((size_t)z * height + y) * width;
+            for (uint32_t x = 0; x < width; ++x)
+                dst_row[x] = f32_to_f16(row[x]);
+        }
+    }
+    readback.Unmap();
+
+    std::ofstream bin_file(filename + ".bin", std::ofstream::binary);
+    if (!bin_file.good()) {
+        // Port-side diagnostics only (upstream wrote unchecked); does not
+        // alter the on-disk byte format.
+        fprintf(stderr, "[graphics] save_texture3D: cannot open %s.bin\n",
+                filename.c_str());
+        return;
+    }
+    bin_file.write((const char *)out.data(),
+                   (std::streamsize)(out.size() * sizeof(uint16_t)));
+    bin_file.close();
+}
+
+void save_texture2D_HDR(Texture2D *texture, std::string filename) {
+    (void)texture; (void)filename; warn_once("save_texture2D_HDR");
+}
+
+uint32_t capture_current_frame() { warn_once("capture_current_frame"); return 0; }
+
+// NOTE: the storage-texture binding is named `tex_target`, not `target` —
+// `target` is a reserved WGSL identifier (Dawn: "'target' is a reserved
+// keyword"), which silently failed CreateShaderModule for all three clear
+// kernels (found in Task 5 while wiring up assert()-validated GPU tests;
+// see task-5-report.md for the deviation writeup).
+static const char *CLEAR_TEX3D_WGSL = R"(
+@group(0) @binding(0) var<uniform> clear_value : vec4<f32>;
+@group(1) @binding(0) var tex_target : texture_storage_3d<r32float, write>;
+@compute @workgroup_size(4, 4, 4)
+fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let dims = textureDimensions(tex_target);
+    if (gid.x >= dims.x || gid.y >= dims.y || gid.z >= dims.z) { return; }
+    textureStore(tex_target, gid, clear_value);
+}
+)";
+
+static const char *CLEAR_TEX2D_F_WGSL = R"(
+@group(0) @binding(0) var<uniform> clear_value : vec4<f32>;
+@group(1) @binding(0) var tex_target : texture_storage_2d<rgba32float, write>;
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let dims = textureDimensions(tex_target);
+    if (gid.x >= dims.x || gid.y >= dims.y) { return; }
+    textureStore(tex_target, gid.xy, clear_value);
+}
+)";
+
+static const char *CLEAR_TEX2D_U_WGSL = R"(
+@group(0) @binding(0) var<uniform> clear_value : vec4<u32>;
+@group(1) @binding(0) var tex_target : texture_storage_2d<r32uint, write>;
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
+    let dims = textureDimensions(tex_target);
+    if (gid.x >= dims.x || gid.y >= dims.y) { return; }
+    textureStore(tex_target, gid.xy, clear_value);
+}
+)";
+
+static void ensure_clear_kernel(ClearKernel *k, const char *wgsl) {
+    if (k->pipeline) return;
+    wgpu::ShaderSourceWGSL src = {};
+    src.code = wgsl;
+    wgpu::ShaderModuleDescriptor mod_desc = {};
+    mod_desc.nextInChain = &src;
+    wgpu::ShaderModule module = g_ctx.device.CreateShaderModule(&mod_desc);
+    wgpu::ComputePipelineDescriptor desc = {};
+    desc.compute.module = module;
+    k->pipeline = g_ctx.device.CreateComputePipeline(&desc);
+    wgpu::BufferDescriptor bdesc = {};
+    bdesc.size = 16;
+    bdesc.usage = wgpu::BufferUsage::Uniform | wgpu::BufferUsage::CopyDst;
+    k->uniform = g_ctx.device.CreateBuffer(&bdesc);
+}
+
+static void run_clear(ClearKernel *k, wgpu::TextureView view, const void *value16,
+                      uint32_t gx, uint32_t gy, uint32_t gz) {
+    // k->uniform is a shared per-kernel scratch buffer: two clears with
+    // different values recorded into the same encoder would both read the
+    // last WriteBuffer's value at execution time without this flush (same
+    // queue-order hazard as update_constant_buffer above).
+    if (g_encoder) flush_commands();
+    g_ctx.queue.WriteBuffer(k->uniform, 0, value16, 16);
+    wgpu::BindGroupEntry e0 = {};
+    e0.binding = 0; e0.buffer = k->uniform; e0.size = 16;
+    wgpu::BindGroupDescriptor g0 = {};
+    g0.layout = k->pipeline.GetBindGroupLayout(0);
+    g0.entryCount = 1; g0.entries = &e0;
+    wgpu::BindGroup group0 = g_ctx.device.CreateBindGroup(&g0);
+    wgpu::BindGroupEntry e1 = {};
+    e1.binding = 0; e1.textureView = view;
+    wgpu::BindGroupDescriptor g1 = {};
+    g1.layout = k->pipeline.GetBindGroupLayout(1);
+    g1.entryCount = 1; g1.entries = &e1;
+    wgpu::BindGroup group1 = g_ctx.device.CreateBindGroup(&g1);
+
+    ensure_encoder();
+    wgpu::ComputePassEncoder pass = g_encoder.BeginComputePass();
+    pass.SetPipeline(k->pipeline);
+    pass.SetBindGroup(0, group0);
+    pass.SetBindGroup(1, group1);
+    pass.DispatchWorkgroups(gx, gy, gz);
+    pass.End();
+}
+
+void clear_texture(Texture3D *texture, float value) {
+    assert(texture->format == Format::R32_FLOAT);
+    ensure_clear_kernel(&g_clear3d, CLEAR_TEX3D_WGSL);
+    float v[4] = {value, value, value, value};
+    run_clear(&g_clear3d, texture->ua_view, v,
+              (texture->width + 3) / 4, (texture->height + 3) / 4,
+              (texture->depth + 3) / 4);
+}
+
+void clear_texture(Texture2D *texture, float value) {
+    assert(texture->format == Format::RGBA32_FLOAT);
+    ensure_clear_kernel(&g_clear2d_f, CLEAR_TEX2D_F_WGSL);
+    float v[4] = {value, value, value, value};
+    run_clear(&g_clear2d_f, texture->ua_view, v,
+              (texture->width + 7) / 8, (texture->height + 7) / 8, 1);
+}
+
+void clear_texture_uint(Texture2D *texture, uint32_t value) {
+    assert(texture->format == Format::R32_UINT);
+    ensure_clear_kernel(&g_clear2d_u, CLEAR_TEX2D_U_WGSL);
+    uint32_t v[4] = {value, value, value, value};
+    run_clear(&g_clear2d_u, texture->ua_view, v,
+              (texture->width + 7) / 8, (texture->height + 7) / 8, 1);
+}
+
+void clear_structured_buffer(StructuredBuffer *buffer) {
+    ensure_encoder();
+    g_encoder.ClearBuffer(buffer->buffer, 0, buffer->size);
+}
+
+// Render bind convention (design §5): texture at slot N -> @group(1)
+// @binding(2N), sampler at slot N -> @binding(2N+1). This is the ONE place
+// the render path deliberately diverges from the compute path's
+// binding==slot(+MAX_SLOTS for samplers, DESIGN §6.3) convention — every
+// render call site pairs a texture and its sampler at the SAME slot number,
+// so a literal binding==slot scheme would put both at the same WGSL binding
+// (a hard Dawn validation error). Each render slot stores an independent
+// view AND sampler together in one RenderSlot struct; the compute path
+// achieves the same texture/sampler independence via two separate parallel
+// arrays (g_compute_slots' single-`kind` tagged union for the resource part,
+// g_compute_samplers for the sampler part) rather than a combined struct —
+// an implementation-detail difference, not a semantic one.
+void set_texture(Texture2D *t, uint32_t slot)  { assert(slot < MAX_SLOTS); g_render_slots[slot].view = t->sr_view; }
+void set_texture(Texture3D *t, uint32_t slot)  { assert(slot < MAX_SLOTS); g_render_slots[slot].view = t->sr_view; }
+// Clears BOTH .view and .sampler (DESIGN §6.1 / I1a). Previously this only
+// cleared .view, leaving a stale sampler-only entry in the slot; the next
+// draw_mesh call would still emit a bind-group entry at binding 2N+1 for
+// that slot even though no texture is bound there, poisoning bind group 1
+// for any pixel shader that doesn't declare a matching sampler binding — a
+// hard Dawn validation error. No caller ever wants to unset a texture while
+// keeping its sampler bound, so both fields are cleared together.
+void unset_texture(uint32_t slot)              { assert(slot < MAX_SLOTS); g_render_slots[slot].view = nullptr; g_render_slots[slot].sampler = nullptr; }
+void set_texture_sampler(TextureSampler *s, uint32_t slot) { assert(slot < MAX_SLOTS); g_render_slots[slot].sampler = s->sampler; }
+
+// Resource setters write ONLY the resource part of the slot (kind/buffer/
+// view) — the paired sampler (if any) at g_compute_samplers[slot] survives
+// untouched, so set_texture_sampled_compute + set_texture_sampler_compute can
+// be called in either order without one erasing the other (DESIGN §6.3).
+void set_texture_compute(Texture2D *t, uint32_t slot)  { assert(slot < MAX_SLOTS); g_compute_slots[slot] = {}; g_compute_slots[slot].kind = BoundSlot::Kind::STORAGE_TEX; g_compute_slots[slot].view = t->ua_view; }
+void set_texture_compute(Texture3D *t, uint32_t slot)  { assert(slot < MAX_SLOTS); g_compute_slots[slot] = {}; g_compute_slots[slot].kind = BoundSlot::Kind::STORAGE_TEX; g_compute_slots[slot].view = t->ua_view; }
+void set_texture_sampled_compute(Texture2D *t, uint32_t slot) { assert(slot < MAX_SLOTS); g_compute_slots[slot] = {}; g_compute_slots[slot].kind = BoundSlot::Kind::SAMPLED_TEX; g_compute_slots[slot].view = t->sr_view; }
+void set_texture_sampled_compute(Texture3D *t, uint32_t slot) { assert(slot < MAX_SLOTS); g_compute_slots[slot] = {}; g_compute_slots[slot].kind = BoundSlot::Kind::SAMPLED_TEX; g_compute_slots[slot].view = t->sr_view; }
+// Writes ONLY the sampler field — no longer zeroes the resource part of the
+// slot (the pre-fix bug: this used to reset g_compute_slots[slot], erasing
+// whatever set_texture_sampled_compute had just written there).
+void set_texture_sampler_compute(TextureSampler *s, uint32_t slot) { assert(slot < MAX_SLOTS); g_compute_samplers[slot] = s->sampler; }
+void unset_texture_compute(uint32_t slot)          { assert(slot < MAX_SLOTS); g_compute_slots[slot] = {}; }
+// graphics.h has no dedicated compute-sampler-unset function, so this clears
+// BOTH the resource and sampler fields of the slot — mirroring unset_texture's
+// render-side rationale (I1a): no caller ever separates unsetting a sampled
+// texture from unsetting its paired sampler.
+void unset_texture_sampled_compute(uint32_t slot)  { assert(slot < MAX_SLOTS); g_compute_slots[slot] = {}; g_compute_samplers[slot] = nullptr; }
+
+
+void set_blend_state(BlendType type) {
+    g_blend = type;
+}
+
+Mesh get_mesh(void *vertices, uint32_t vertex_count, uint32_t vertex_stride,
+              void *indices, uint32_t index_count, uint32_t index_byte_size,
+              Topology topology) {
+    // Real vertex buffer now (M3 draws it); index path unused by main.cpp
+    // (inventory §1: both meshes are non-indexed) — assert it stays that way.
+    assert(indices == nullptr && index_count == 0 && "fork: non-indexed meshes only");
+    (void)index_byte_size;
+    Mesh m = {};
+    wgpu::BufferDescriptor desc = {};
+    desc.size = ((uint64_t)vertex_count * vertex_stride + 3u) & ~3ull;
+    desc.usage = wgpu::BufferUsage::Vertex | wgpu::BufferUsage::CopyDst;
+    m.vertex_buffer = g_ctx.device.CreateBuffer(&desc);
+    g_ctx.queue.WriteBuffer(m.vertex_buffer, 0, vertices,
+                            (uint64_t)vertex_count * vertex_stride);
+    m.vertex_stride = vertex_stride;
+    m.vertex_count = vertex_count;
+    m.topology = topology;
+    return m;
+}
+
+static wgpu::PrimitiveTopology to_wgpu_topology(Topology t) {
+    switch (t) {
+        case Topology::TRIANGLESTRIP: return wgpu::PrimitiveTopology::TriangleStrip;
+        case Topology::TRIANGLELIST:
+        default:                      return wgpu::PrimitiveTopology::TriangleList;
+    }
+}
+
+// Vertex layout table (design §3): exactly two vertex shapes exist in the
+// whole program. Explicit switch, not a generic format-inference/shader-
+// source parser (rejects reviving the D3D11 original's buggy
+// get_vertex_input_desc_from_shader tokenizer) — a third stride is a loud
+// fatal(), not a silent guess.
+static void fill_vertex_attributes(uint32_t stride, wgpu::VertexAttribute *attrs) {
+    switch (stride) {
+        case 24:
+            attrs[0] = {}; attrs[0].format = wgpu::VertexFormat::Float32x4;
+            attrs[0].offset = 0;  attrs[0].shaderLocation = 0;
+            attrs[1] = {}; attrs[1].format = wgpu::VertexFormat::Float32x2;
+            attrs[1].offset = 16; attrs[1].shaderLocation = 1;
+            return;
+        case 28:
+            attrs[0] = {}; attrs[0].format = wgpu::VertexFormat::Float32x4;
+            attrs[0].offset = 0;  attrs[0].shaderLocation = 0;
+            attrs[1] = {}; attrs[1].format = wgpu::VertexFormat::Float32x3;
+            attrs[1].offset = 16; attrs[1].shaderLocation = 1;
+            return;
+        default: {
+            char msg[128];
+            snprintf(msg, sizeof(msg), "draw_mesh: no vertex layout for stride %u", stride);
+            fatal(msg);
+        }
+    }
+}
+
+static wgpu::RenderPipeline build_pipeline(VertexShader *vs, PixelShader *ps,
+                                           BlendType blend, uint32_t stride,
+                                           Topology topology,
+                                           wgpu::TextureFormat target_format) {
+    wgpu::VertexAttribute attrs[2];
+    fill_vertex_attributes(stride, attrs);
+
+    wgpu::VertexBufferLayout vbuf_layout = {};
+    vbuf_layout.arrayStride = stride;
+    vbuf_layout.stepMode = wgpu::VertexStepMode::Vertex;
+    vbuf_layout.attributeCount = 2;
+    vbuf_layout.attributes = attrs;
+
+    wgpu::VertexState vertex_state = {};
+    vertex_state.module = vs->module;
+    vertex_state.bufferCount = 1;
+    vertex_state.buffers = &vbuf_layout;
+
+    // Blend mapping (design §2b, from the D3D11 original's recorded
+    // behaviour): OPAQUE = disabled (blend=nullptr); ALPHA = src-alpha/
+    // inv-src-alpha on color, same formula on alpha (documented guess — the
+    // alpha-channel op wasn't independently recorded, but is unobservable in
+    // M3 since ps_particles_color always writes a=1.0; risk #6).
+    wgpu::BlendState blend_state = {};
+    blend_state.color = {wgpu::BlendOperation::Add, wgpu::BlendFactor::SrcAlpha,
+                         wgpu::BlendFactor::OneMinusSrcAlpha};
+    blend_state.alpha = {wgpu::BlendOperation::Add, wgpu::BlendFactor::SrcAlpha,
+                         wgpu::BlendFactor::OneMinusSrcAlpha};
+
+    wgpu::ColorTargetState color_target = {};
+    color_target.format = target_format;  // window => BGRA8UnormSrgb (window_view()'s
+    // format); offscreen => RenderTarget::format (see PipelineCacheEntry's
+    // comment for why this isn't hardcoded).
+    color_target.blend = (blend == BlendType::ALPHA) ? &blend_state : nullptr;
+
+    wgpu::FragmentState fragment_state = {};
+    fragment_state.module = ps->module;
+    fragment_state.targetCount = 1;
+    fragment_state.targets = &color_target;
+
+    wgpu::RenderPipelineDescriptor desc = {};
+    desc.vertex = vertex_state;
+    desc.fragment = &fragment_state;
+    desc.primitive.topology = to_wgpu_topology(topology);
+    desc.depthStencil = nullptr;   // depth out of scope for M3/M4 (design §7)
+
+    g_ctx.device.PushErrorScope(wgpu::ErrorFilter::Validation);
+    wgpu::RenderPipeline pipeline = g_ctx.device.CreateRenderPipeline(&desc);
+    bool done = false, had_error = false;
+    g_ctx.device.PopErrorScope(
+        wgpu::CallbackMode::AllowProcessEvents,
+        [&done, &had_error](wgpu::PopErrorScopeStatus, wgpu::ErrorType type,
+                            wgpu::StringView message) {
+            if (type != wgpu::ErrorType::NoError) {
+                had_error = true;
+                fprintf(stderr, "[graphics] render pipeline error: %.*s\n",
+                        (int)message.length, message.data);
+            }
+            done = true;
+        });
+    wait_for(&done);
+    if (had_error) {
+        fatal("draw_mesh: render pipeline creation failed for the current "
+              "vertex/pixel shader pair (see Dawn validation error above)");
+    }
+    return pipeline;
+}
+
+void draw_mesh(Mesh *mesh) {
+    assert(g_vertex_shader && g_vertex_shader->valid && g_pixel_shader && g_pixel_shader->valid);
+
+    // Lazy pipeline cache (design §2): linear scan on .Get() pointer
+    // equality. Cache key omits depth-attachment presence (constant: never
+    // bound, §7) but DOES include target format — see g_pipeline_cache's
+    // declaration comment for why that widens design §2's original proposal.
+    WGPUShaderModule vs_key = g_vertex_shader->module.Get();
+    WGPUShaderModule ps_key = g_pixel_shader->module.Get();
+    // Target format: the window's fixed sRGB BGRA8 view (matches
+    // window_view()) for the window target, else the offscreen
+    // RenderTarget's own format (see PipelineCacheEntry's comment).
+    wgpu::TextureFormat target_format = g_render_target.is_window
+        ? wgpu::TextureFormat::BGRA8UnormSrgb
+        : to_wgpu(g_render_target.format);
+    wgpu::RenderPipeline pipeline;
+    for (auto &entry : g_pipeline_cache) {
+        if (entry.vs == vs_key && entry.ps == ps_key && entry.blend == g_blend &&
+            entry.stride == mesh->vertex_stride && entry.target_format == target_format &&
+            entry.topology == mesh->topology) {
+            pipeline = entry.pipeline;
+            break;
+        }
+    }
+    if (!pipeline) {
+        pipeline = build_pipeline(g_vertex_shader, g_pixel_shader, g_blend,
+                                  mesh->vertex_stride, mesh->topology, target_format);
+        PipelineCacheEntry entry;
+        entry.vs = vs_key; entry.ps = ps_key; entry.blend = g_blend;
+        entry.stride = mesh->vertex_stride; entry.target_format = target_format;
+        entry.topology = mesh->topology;
+        entry.pipeline = pipeline;
+        g_pipeline_cache.push_back(entry);
+    }
+
+    // Bind group 0 (uniform), only if either stage declares @group(0) —
+    // mirrors run_compute's uses_group0 gate exactly (design §5). Stage
+    // visibility comes free from the pipeline's auto bind-group-layout.
+    wgpu::BindGroup group0;
+    bool needs_group0 = g_vertex_shader->uses_group0 || g_pixel_shader->uses_group0;
+    if (needs_group0) {
+        if (!g_uniform_buffer) {
+            fatal("draw_mesh: shader declares @group(0) uniform but no constant buffer is bound (set_constant_buffer slot 0)");
+        }
+        wgpu::BindGroupEntry e = {};
+        e.binding = 0; e.buffer = g_uniform_buffer; e.size = g_uniform_size;
+        wgpu::BindGroupDescriptor d = {};
+        d.layout = pipeline.GetBindGroupLayout(0);
+        d.entryCount = 1; d.entries = &e;
+        group0 = g_ctx.device.CreateBindGroup(&d);
+    }
+
+    // Bind group 1: textures/samplers by the 2N/2N+1 convention (design §5).
+    std::vector<wgpu::BindGroupEntry> entries;
+    for (uint32_t slot = 0; slot < MAX_SLOTS; slot++) {
+        const RenderSlot &s = g_render_slots[slot];
+        if (s.view) {
+            wgpu::BindGroupEntry e = {};
+            e.binding = 2 * slot; e.textureView = s.view;
+            entries.push_back(e);
+        }
+        if (s.sampler) {
+            wgpu::BindGroupEntry e = {};
+            e.binding = 2 * slot + 1; e.sampler = s.sampler;
+            entries.push_back(e);
+        }
+    }
+    wgpu::BindGroupDescriptor d1 = {};
+    d1.layout = pipeline.GetBindGroupLayout(1);
+    d1.entryCount = entries.size(); d1.entries = entries.data();
+    wgpu::BindGroup group1 = g_ctx.device.CreateBindGroup(&d1);
+
+    ensure_encoder();
+    wgpu::TextureView view = g_render_target.is_window ? window_view() : g_render_target.rt_view;
+    wgpu::RenderPassColorAttachment att = {};
+    att.view = view;
+    att.loadOp = wgpu::LoadOp::Load;    // preserve the prior clear/draw (design §4)
+    att.storeOp = wgpu::StoreOp::Store;
+    wgpu::RenderPassDescriptor pass_desc = {};
+    pass_desc.colorAttachmentCount = 1;
+    pass_desc.colorAttachments = &att;
+    wgpu::RenderPassEncoder pass = g_encoder.BeginRenderPass(&pass_desc);
+    pass.SetPipeline(pipeline);
+    if (group0) pass.SetBindGroup(0, group0);
+    pass.SetBindGroup(1, group1);
+    pass.SetVertexBuffer(0, mesh->vertex_buffer);
+    pass.Draw(mesh->vertex_count);
+    pass.End();
+}
+
+void set_structured_buffer(StructuredBuffer *b, uint32_t slot) { assert(slot < MAX_SLOTS); g_compute_slots[slot] = {}; g_compute_slots[slot].kind = BoundSlot::Kind::STORAGE_BUFFER; g_compute_slots[slot].buffer = b->buffer; g_compute_slots[slot].buffer_size = b->size; }
+
+void unset_structured_buffer(uint32_t slot)
+{
+    assert(slot < MAX_SLOTS);
+    g_compute_slots[slot] = {};
+}
+
+void capture_structured_buffer(StructuredBuffer *buffer, void *mapped_data,
+                               uint32_t num_elements, size_t element_size) {
+    uint64_t byte_count = (uint64_t)num_elements * element_size;
+    assert(byte_count <= buffer->size);
+    if (!buffer->readback) {
+        wgpu::BufferDescriptor desc = {};
+        desc.size = buffer->size;
+        desc.usage = wgpu::BufferUsage::MapRead | wgpu::BufferUsage::CopyDst;
+        buffer->readback = g_ctx.device.CreateBuffer(&desc);
+    }
+    // Flush pending compute, copy, submit, block on map — reproducing the
+    // D3D11 Map(D3D11_MAP_READ) same-frame stall (inventory §6). Latency is a
+    // conscious non-goal here: correctness first, matching original behavior.
+    ensure_encoder();
+    g_encoder.CopyBufferToBuffer(buffer->buffer, 0, buffer->readback, 0, buffer->size);
+    flush_commands();
+
+    bool done = false;
+    buffer->readback.MapAsync(
+        wgpu::MapMode::Read, 0, buffer->size, wgpu::CallbackMode::AllowProcessEvents,
+        [&done](wgpu::MapAsyncStatus status, wgpu::StringView message) {
+            if (status != wgpu::MapAsyncStatus::Success)
+                fprintf(stderr, "[graphics] readback map failed: %.*s\n",
+                        (int)message.length, message.data);
+            done = true;
+        });
+    wait_for(&done);
+    const void *src = buffer->readback.GetConstMappedRange(0, buffer->size);
+    if (src) memcpy(mapped_data, src, byte_count);
+    buffer->readback.Unmap();
+}
+
+// Mirrors get_compute_shader_from_code's error-scope validation pattern
+// exactly (PushErrorScope -> CreateShaderModule -> PopErrorScope callback ->
+// wait_for -> valid = !had_error). Each compiles ONE file with ONE entry
+// point named `main` (@vertex or @fragment) — vs and ps stay in separate
+// files/modules (design §1); wgpu::RenderPipelineDescriptor natively accepts
+// two distinct ShaderModules, so no call-site restructuring is needed.
+//
+// NOTE on `is_ready`: for render shaders this means "this WGSL module
+// compiled," a WEAKER guarantee than compute's "pipeline built" (design §1).
+// CreateShaderModule only proves the WGSL parses/type-checks in isolation —
+// it does NOT prove compatibility with a specific vertex-buffer stride,
+// blend target format, or its paired stage. Those errors surface only at
+// draw_mesh's CreateRenderPipeline call, necessarily later, because stride/
+// blend/format aren't known until a Mesh is drawn.
+VertexShader get_vertex_shader_from_code(char *code, uint32_t code_length) {
+    (void)code_length;
+    g_ctx.device.PushErrorScope(wgpu::ErrorFilter::Validation);
+
+    wgpu::ShaderSourceWGSL src = {};
+    src.code = code;
+    wgpu::ShaderModuleDescriptor mod_desc = {};
+    mod_desc.nextInChain = &src;
+    wgpu::ShaderModule module = g_ctx.device.CreateShaderModule(&mod_desc);
+
+    bool done = false, had_error = false;
+    g_ctx.device.PopErrorScope(
+        wgpu::CallbackMode::AllowProcessEvents,
+        [&done, &had_error](wgpu::PopErrorScopeStatus, wgpu::ErrorType type,
+                            wgpu::StringView message) {
+            if (type != wgpu::ErrorType::NoError) {
+                had_error = true;
+                fprintf(stderr, "[graphics] vertex shader error: %.*s\n",
+                        (int)message.length, message.data);
+            }
+            done = true;
+        });
+    wait_for(&done);
+
+    VertexShader vs = {};
+    vs.module = module;
+    vs.valid = !had_error;
+    vs.uses_group0 = (strstr(code, "@group(0)") != NULL);
+    return vs;
+}
+
+PixelShader get_pixel_shader_from_code(char *code, uint32_t code_length) {
+    (void)code_length;
+    g_ctx.device.PushErrorScope(wgpu::ErrorFilter::Validation);
+
+    wgpu::ShaderSourceWGSL src = {};
+    src.code = code;
+    wgpu::ShaderModuleDescriptor mod_desc = {};
+    mod_desc.nextInChain = &src;
+    wgpu::ShaderModule module = g_ctx.device.CreateShaderModule(&mod_desc);
+
+    bool done = false, had_error = false;
+    g_ctx.device.PopErrorScope(
+        wgpu::CallbackMode::AllowProcessEvents,
+        [&done, &had_error](wgpu::PopErrorScopeStatus, wgpu::ErrorType type,
+                            wgpu::StringView message) {
+            if (type != wgpu::ErrorType::NoError) {
+                had_error = true;
+                fprintf(stderr, "[graphics] pixel shader error: %.*s\n",
+                        (int)message.length, message.data);
+            }
+            done = true;
+        });
+    wait_for(&done);
+
+    PixelShader ps = {};
+    ps.module = module;
+    ps.valid = !had_error;
+    ps.uses_group0 = (strstr(code, "@group(0)") != NULL);
+    return ps;
+}
+
+ComputeShader get_compute_shader_from_code(char *code, uint32_t code_length,
+                                           const ShaderConstant *constants,
+                                           uint32_t constant_count) {
+    ComputeShader cs = {};
+    // file_system::read_file guarantees a trailing NUL (Task 1), so `code` is
+    // a valid C string; code_length is unused but kept for signature parity.
+    (void)code_length;
+
+    g_ctx.device.PushErrorScope(wgpu::ErrorFilter::Validation);
+
+    wgpu::ShaderSourceWGSL src = {};
+    src.code = code;
+    wgpu::ShaderModuleDescriptor mod_desc = {};
+    mod_desc.nextInChain = &src;
+    wgpu::ShaderModule module = g_ctx.device.CreateShaderModule(&mod_desc);
+
+    std::vector<wgpu::ConstantEntry> entries(constant_count);
+    for (uint32_t i = 0; i < constant_count; i++) {
+        entries[i] = {};
+        entries[i].key = constants[i].name;
+        entries[i].value = constants[i].value;
+    }
+    wgpu::ComputePipelineDescriptor desc = {};
+    desc.compute.module = module;
+    desc.compute.constantCount = constant_count;
+    desc.compute.constants = entries.data();
+    cs.pipeline = g_ctx.device.CreateComputePipeline(&desc);
+
+    bool done = false, had_error = false;
+    g_ctx.device.PopErrorScope(
+        wgpu::CallbackMode::AllowProcessEvents,
+        [&done, &had_error](wgpu::PopErrorScopeStatus, wgpu::ErrorType type,
+                            wgpu::StringView message) {
+            if (type != wgpu::ErrorType::NoError) {
+                had_error = true;
+                fprintf(stderr, "[graphics] shader/pipeline error: %.*s\n",
+                        (int)message.length, message.data);
+            }
+            done = true;
+        });
+    wait_for(&done);
+    cs.valid = !had_error;
+
+    // Comment-safe enough for our controlled sources: every sim shader that
+    // uses a uniform declares it as literally "@group(0)".
+    cs.uses_group0 = (strstr(code, "@group(0)") != NULL);
+    return cs;
+}
+
+void set_vertex_shader(VertexShader *shader) { g_vertex_shader = shader; }
+void set_pixel_shader(PixelShader *shader)   { g_pixel_shader = shader; }
+
+void set_compute_shader(ComputeShader *shader) {
+    g_compute_shader = shader;
+}
+
+void run_compute(int gx, int gy, int gz) {
+    assert(g_compute_shader && g_compute_shader->valid);
+    ensure_encoder();
+
+    // Group 0: uniform at binding 0, if the shader declares one.
+    // Group 1: every currently-bound resource slot (g_compute_slots, binding
+    // == slot) PLUS every currently-bound sampler slot (g_compute_samplers,
+    // binding == MAX_SLOTS + slot = 16 + N — DESIGN §6.3, set alongside
+    // resource entries in the two loops below). CONTRACT: the union of both
+    // bound sets must exactly match the shader's @group(1) declarations —
+    // extra or missing entries in either array are a Dawn validation error
+    // (which names the binding; that is the intended failure mode, better
+    // than D3D11's silent null reads).
+    wgpu::BindGroup group0;
+    if (g_compute_shader->uses_group0) {
+        if (!g_uniform_buffer) {
+            fatal("run_compute: shader declares @group(0) uniform but no constant buffer is bound (set_constant_buffer slot 0)");
+        }
+        wgpu::BindGroupEntry e = {};
+        e.binding = 0; e.buffer = g_uniform_buffer; e.size = g_uniform_size;
+        wgpu::BindGroupDescriptor d = {};
+        d.layout = g_compute_shader->pipeline.GetBindGroupLayout(0);
+        d.entryCount = 1; d.entries = &e;
+        group0 = g_ctx.device.CreateBindGroup(&d);
+    }
+    // Shader without @group(0): never bind group 0, even if shadow state holds a uniform.
+
+    std::vector<wgpu::BindGroupEntry> entries;
+    for (uint32_t i = 0; i < MAX_SLOTS; i++) {
+        const BoundSlot &s = g_compute_slots[i];
+        if (s.kind == BoundSlot::Kind::NONE) continue;
+        wgpu::BindGroupEntry e = {};
+        e.binding = i;
+        switch (s.kind) {
+            case BoundSlot::Kind::STORAGE_BUFFER: e.buffer = s.buffer; e.size = s.buffer_size; break;
+            case BoundSlot::Kind::STORAGE_TEX:
+            case BoundSlot::Kind::SAMPLED_TEX:    e.textureView = s.view; break;
+            default: break;
+        }
+        entries.push_back(e);
+    }
+    // Compute samplers bind at MAX_SLOTS + slot: resources keep binding==slot
+    // so all pre-M4 shaders are unchanged; cs_volpath's WGSL (M4b) declares
+    // @binding(17/18/19/20) for its s1/s2/s3/s4 samplers.
+    for (uint32_t i = 0; i < MAX_SLOTS; i++) {
+        if (!g_compute_samplers[i]) continue;
+        wgpu::BindGroupEntry e = {};
+        e.binding = MAX_SLOTS + i;
+        e.sampler = g_compute_samplers[i];
+        entries.push_back(e);
+    }
+    wgpu::BindGroupDescriptor d1 = {};
+    d1.layout = g_compute_shader->pipeline.GetBindGroupLayout(1);
+    d1.entryCount = entries.size(); d1.entries = entries.data();
+    wgpu::BindGroup group1 = g_ctx.device.CreateBindGroup(&d1);
+
+    wgpu::ComputePassEncoder pass = g_encoder.BeginComputePass();
+    pass.SetPipeline(g_compute_shader->pipeline);
+    if (group0) pass.SetBindGroup(0, group0);
+    pass.SetBindGroup(1, group1);
+    pass.DispatchWorkgroups((uint32_t)gx, (uint32_t)gy, (uint32_t)gz);
+    pass.End();
+}
+
+bool is_ready(RenderTarget *p)     { return p->is_window || p->rt_view != nullptr; }
+bool is_ready(DepthBuffer *p)      { return p->ds_view != nullptr; }
+bool is_ready(Texture2D *p)        { return p->texture != nullptr; }
+bool is_ready(Texture3D *p)        { return p->texture != nullptr; }
+bool is_ready(Mesh *p)             { return p->vertex_buffer != nullptr; }
+bool is_ready(ConstantBuffer *p)   { return p->buffer != nullptr; }
+bool is_ready(StructuredBuffer *p) { return p->buffer != nullptr; }
+bool is_ready(TextureSampler *p)   { return p->sampler != nullptr; }
+bool is_ready(VertexShader *p)     { return p->valid; }
+bool is_ready(PixelShader *p)      { return p->valid; }
+bool is_ready(ComputeShader *p)    { return p->valid; }
+
+void release(RenderTarget *p)     { *p = {}; }
+void release(DepthBuffer *p)      { *p = {}; }
+void release(Texture2D *p)        { *p = {}; }
+void release(Texture3D *p)        { *p = {}; }
+void release(Mesh *p)             { *p = {}; }
+void release(ConstantBuffer *p)   { *p = {}; }
+void release(StructuredBuffer *p) { *p = {}; }
+void release(TextureSampler *p)   { *p = {}; }
+void release(VertexShader *p)     { *p = {}; }
+void release(PixelShader *p)      { *p = {}; }
+void release(ComputeShader *p)    { *p = {}; }
 
-VertexShader graphics::get_vertex_shader_from_code(char *code, uint32_t code_length)
-{
-	memory::push_temp_state();
-
-	// Compile shader
-    CompiledShader vertex_shader_compiled = graphics::compile_vertex_shader(code, code_length);
-	assert(graphics::is_ready(&vertex_shader_compiled));
-
-	// Get VertexInpuDescs
-    uint32_t vertex_input_count = graphics::get_vertex_input_desc_from_shader(code, code_length, NULL);
-	VertexInputDesc *vertex_input_descs = memory::alloc_temp<VertexInputDesc>(vertex_input_count);
-	graphics::get_vertex_input_desc_from_shader(code, code_length, vertex_input_descs);
-
-	// Get VertexShader object
-    VertexShader vertex_shader = graphics::get_vertex_shader(&vertex_shader_compiled, vertex_input_descs, 2);
-    graphics::release(&vertex_shader_compiled);
-
-	memory::pop_temp_state();
-	return vertex_shader;
-}
-
-
-PixelShader graphics::get_pixel_shader_from_code(char *code, uint32_t code_length)
-{
-	CompiledShader pixel_shader_compiled = graphics::compile_pixel_shader(code, code_length);
-	assert(graphics::is_ready(&pixel_shader_compiled));
-	
-    PixelShader pixel_shader = graphics::get_pixel_shader(&pixel_shader_compiled);
-    graphics::release(&pixel_shader_compiled);
-
-	return pixel_shader;
-}
-
-ComputeShader graphics::get_compute_shader_from_code(char *code, uint32_t code_length)
-{
-	CompiledShader compute_shader_compiled = graphics::compile_compute_shader(code, code_length);
-	assert(graphics::is_ready(&compute_shader_compiled));
-	
-    ComputeShader compute_shader = graphics::get_compute_shader(&compute_shader_compiled);
-    graphics::release(&compute_shader_compiled);
-
-	return compute_shader;
 }

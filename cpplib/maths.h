@@ -197,7 +197,6 @@ struct Vector4
 		struct
 		{
 			Vector3 xyz;
-			float w;
 		};
 	};
 
