@@ -370,10 +370,14 @@ int main(int argc, char **argv)
     // headless mode has no keyboard input, and the validation run must not
     // launch the GUI. The quirk-preserved F6 block itself is untouched.
     bool export_on_exit = false;
+    // --agents N starts with N active agents (clamped to the config.polyp
+    // maximum); the AGENT COUNT combo picks this up and can change it later.
+    int32_t agents_override = 0;
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--headless") == 0 && i + 1 < argc) headless_frames = atoi(argv[i + 1]);
         if (strcmp(argv[i], "--dataset") == 0 && i + 1 < argc) dataset_override = argv[i + 1];
         if (strcmp(argv[i], "--export") == 0) export_on_exit = true;
+        if (strcmp(argv[i], "--agents") == 0 && i + 1 < argc) agents_override = atoi(argv[i + 1]);
     }
     const bool headless = headless_frames > 0;
 
@@ -439,6 +443,10 @@ int main(int argc, char **argv)
     // active_agents + data_count particles. Headless runs never touch the
     // UI, so active_agents == NUM_AGENTS there (validation unaffected).
     int32_t active_agents = NUM_AGENTS;
+    if (agents_override > 0) {
+        active_agents = agents_override < NUM_AGENTS ? agents_override : NUM_AGENTS;
+        printf("-> active agents (--agents): %d\n", active_agents);
+    }
 
     // World and grid setup
         // Set world size to encapsulate data
@@ -809,7 +817,7 @@ int main(int argc, char **argv)
     simulation_config.move_sense_coef = SAMPLING_EXPONENT;
     simulation_config.normalization_factor = 1.0;
     simulation_config.n_data_points = data_count;
-    simulation_config.n_agents = NUM_AGENTS;
+    simulation_config.n_agents = active_agents;
     simulation_config.n_iteration = 0;
     ConstantBuffer config_buffer = graphics::get_constant_buffer(sizeof(SimulationConfig));
 

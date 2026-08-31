@@ -59,7 +59,11 @@ cd bin
 ```
 
 `--dataset` is required for windowed runs (the compile-time default file
-is not shipped). Controls are documented in-app: the **SHORTCUTS** panel
+is not shipped). `--agents N` starts with N active agents (clamped to the
+`config.polyp` maximum; the AGENT COUNT combo can still change it later).
+The launcher scripts `./run_sdss.sh` (`--quick` for the viz slice) and
+`./run_2mrs.sh` wrap these invocations and start at 1M agents; extra
+arguments are forwarded to the binary. Controls are documented in-app: the **SHORTCUTS** panel
 (collapsed by default). Highlights: F1 UI, F2 full reset, F3 pause,
 F6 export, F8 clear trace, left-drag orbit / right-drag pan / scroll zoom.
 
