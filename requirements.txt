@@ -1,0 +1,18 @@
+# Python dependencies for the offline tools in tools/. Install into the
+# repo-local venv, which every documented command uses:
+#
+#     python3 -m venv .venv
+#     .venv/bin/pip install -r requirements.txt
+#
+# tools/export_vdb.py additionally needs the `openvdb` module, which has
+# no macOS wheel; the from-source recipe is in that script's docstring.
+
+# tools/pack_catalog.py, tools/pack_vac_catalog.py, tools/validate/*
+numpy
+scikit-image
+matplotlib
+
+# tools/validate/extract_reference.py only: reads the published VAC cube.
+# pyslime forgets to declare astropy, so it is listed explicitly.
+pyslime
+astropy

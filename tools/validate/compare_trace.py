@@ -8,7 +8,8 @@ Inputs:
                  and export_metadata.txt (grid dims).
   --reference  : mcpm_sdss_d8.npy — float32 (89, 150, 91) = (X, Y, Z),
                  block-averaged 8x from the published 712x1200x728 cube by
-                 skymap's extractMcpmCube.py (downscale_local_mean).
+                 tools/validate/extract_reference.py (downscale_local_mean).
+                 Defaults to the vendored bin/data/reference/mcpm_sdss_d8.npy.
 
 Reports (NO pass/fail verdict — measure-first policy, M5 design §1: the
 human sets the acceptance bar after the first honest measurement):
@@ -40,7 +41,9 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from skimage.transform import downscale_local_mean
 
-D8_SHAPE = (89, 150, 91)   # (X, Y, Z) — extractMcpmCube.py convention
+REPO_ROOT = Path(__file__).resolve().parents[2]
+REFERENCE_DEFAULT = REPO_ROOT / 'bin' / 'data' / 'reference' / 'mcpm_sdss_d8.npy'
+D8_SHAPE = (89, 150, 91)   # (X, Y, Z) — extract_reference.py convention
 # eps rationale (design §8.3): d8 nonzero minimum ~= 3.9e-4, so 1e-3 sits at
 # the bottom of the signal range — no -inf, negligible compression of real
 # structure, round number. New explicit choice (compareCubes.py is linear
@@ -301,17 +304,17 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--export-dir')
-    ap.add_argument('--reference')
+    ap.add_argument('--reference', default=str(REFERENCE_DEFAULT))
     ap.add_argument('--out')
     ap.add_argument('--eps', type=float, default=DEFAULT_EPS)
     ap.add_argument('--orientation-scan', action='store_true')
     ap.add_argument('--self-test', action='store_true')
     args = ap.parse_args()
     if args.self_test:
-        self_test(args.reference)
+        self_test(args.reference if Path(args.reference).exists() else None)
         return 0
-    if not (args.export_dir and args.reference and args.out):
-        ap.error('--export-dir, --reference and --out are required unless --self-test')
+    if not (args.export_dir and args.out):
+        ap.error('--export-dir and --out are required unless --self-test')
     run_compare(args.export_dir, args.reference, args.out, args.eps,
                 args.orientation_scan)
     return 0

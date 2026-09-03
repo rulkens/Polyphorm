@@ -2,10 +2,10 @@
 """pack_vac_catalog.py — pack PolyPhy's bundled VAC input catalog into
 Polyphorm's .bin/_metadata.txt input pair (M5 validation dataset).
 
-Input : ~/Development/vendor/python/PolyPhy/data/csv/sample_3D_linW.csv
-        (READ-ONLY; 324,901 rows, no header, columns x,y,z,weight;
-        xyz in Mpc, weight in 1e9 Msun — exactly 1000x Polyphorm's
-        1e12 Msun bin convention, per rhizome DATA_LINEAGE.md)
+Input : bin/data/reference/sample_3D_linW.csv (vendored from PolyPhy;
+        provenance in bin/data/reference/README.md. 324,901 rows, no
+        header, columns x,y,z,weight; xyz in Mpc, weight in 1e9 Msun —
+        exactly 1000x Polyphorm's 1e12 Msun bin convention)
 Output: <out>.bin           float32 XYZW records (arr.tofile)
         <out>_metadata.txt  the exact positional key sequence
                             pack_data_celestial.py writes — main.cpp's
@@ -20,13 +20,15 @@ import sys
 
 import numpy as np
 
-CSV_DEFAULT = os.path.expanduser(
-    '~/Development/vendor/python/PolyPhy/data/csv/sample_3D_linW.csv')
+REPO_ROOT = os.path.normpath(os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), '..'))
+CSV_DEFAULT = os.path.join(REPO_ROOT, 'bin', 'data', 'reference',
+                           'sample_3D_linW.csv')
 # The VAC's own dataset name (reference export_metadata.txt) so the run's
 # --dataset line matches the published metadata verbatim.
-OUT_DEFAULT = os.path.normpath(os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), '..', 'bin', 'data', 'SDSS',
-    'sdssGalaxy_rsdCorr_dbscan_e2p0ms3_dz0p001_m10p0_t=0.0'))
+OUT_DEFAULT = os.path.join(
+    REPO_ROOT, 'bin', 'data', 'SDSS',
+    'sdssGalaxy_rsdCorr_dbscan_e2p0ms3_dz0p001_m10p0_t=0.0')
 
 EXPECTED_POINTS = 324901           # validation-target research §3
 WEIGHT_DIVISOR = 1000.0            # 1e9 Msun (CSV) -> 1e12 Msun (Polyphorm)
@@ -34,7 +36,7 @@ SHIPPED_MEAN_WEIGHT = 0.013950215  # shipped galaxiesInSdssSlice metadata —
                                    # same sample family, so a 1000x unit slip
                                    # is unmistakable (design §5.3)
 
-# Published VAC grid (skymap .../mcpm/export_metadata.txt) — the anchoring
+# Published VAC grid (bin/data/reference/export_metadata.txt) — the anchoring
 # target. Strategy (design §6.1): do NOT fork main.cpp's quirk-preserved
 # auto-fit; feed it the same inputs (this catalog's bbox + config knobs) and
 # predict what it will produce. The C++ is authoritative; the run's own

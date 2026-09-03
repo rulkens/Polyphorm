@@ -6,8 +6,8 @@ hard-wired to the SDSS VAC (point-count and unit hard-fails, grid
 provenance checks); this one packs any catalog in the same CSV layout,
 e.g. PolyPhy's 2MRS export:
 
-    python3 tools/pack_catalog.py \
-        --csv ~/Development/vendor/python/PolyPhy/data/csv/2mrs_gui.csv \
+    .venv/bin/python tools/pack_catalog.py \
+        --csv path/to/2mrs_gui.csv \
         --out bin/data/2MRS/2mrs_gui
 
 Then run with `--dataset data/2MRS/2mrs_gui` (from bin/). Output format
