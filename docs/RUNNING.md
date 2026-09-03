@@ -93,11 +93,13 @@ Three catalogs are in use on this branch:
 
   The script hard-fails on point count and unit mismatches.
 - `data/2MRS/2mrs_gui`, the 2MRS catalog (34,974 galaxies, equatorial
-  cartesian Mpc). Any x,y,z,weight CSV in this layout can be packed
-  with the generic packer:
+  cartesian Mpc), tracked in the repo as both the source CSV and the
+  packed pair; see `bin/data/2MRS/README.md`. It is an interactive
+  extra, not part of the validation. Any x,y,z,weight CSV in this
+  layout can be packed with the generic packer:
 
   ```sh
-  .venv/bin/python tools/pack_catalog.py --csv path/to/catalog.csv --out bin/data/2MRS/2mrs_gui
+  .venv/bin/python tools/pack_catalog.py --csv bin/data/2MRS/2mrs_gui.csv --out bin/data/2MRS/2mrs_gui
   ```
 
 `bin/data/reference/` holds the validation inputs that did not originate

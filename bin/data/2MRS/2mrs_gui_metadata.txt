@@ -1,0 +1,8 @@
+Number of points = 34974
+Min X = -646.47656
+Max X = 689.0237
+Min Y = -370.4463
+Max Y = 412.57773
+Min Z = -483.16614
+Max Z = 556.9248
+Mean weight = 85.59782
