@@ -125,3 +125,35 @@ quirk-by-quirk A/B hunts (post-M5). Human's decision (2026-08-13, verbatim):
 "accept at ≥0.9" — the measured 3D log-trace Pearson at d8 (+0.9640 masked /
 +0.9570 unmasked) clears the accepted bar. M5 PASSED; milestone closed.
 No quirk A/B hunts triggered.
+
+## Post-M5 (2026-09-03): consolidation + second-export measurement
+
+Consolidation for handoff: the reference cube, the VAC metadata and the
+input CSV now live in `bin/data/reference/` (provenance and checksums in
+its README); `tools/validate/download_vac.py` fetches the published cube
+from the SDSS archive and `tools/validate/extract_reference.py` (the
+skymap extractor with repo-relative paths) re-derives the d8 cube; the
+packer and comparison tool default to the vendored files.
+
+While consolidating, a second full-scale export was found on disk at
+`bin/export/trace.bin` (mtime 2026-08-13 11:05, md5
+7c91738f66fecbdd3851923759f0cc0b; metadata: same dataset, 10M agents,
+712x1200x728). It is a different run from run 1 (run 1's export was
+written at 01:38 and has since been overwritten; the report numbers
+differ). Its command line and iteration count were not logged, so it is
+reported as a second data point, not a protocol run. Compared against
+the vendored reference with the same tool (identity again won the
+orientation scan, by 0.0551 mean-Pearson):
+
+| metric | run 1 (masked / unmasked) | second export (masked / unmasked) |
+|---|---|---|
+| 3D voxelwise | +0.9640 / +0.9570 | +0.9649 / +0.9564 |
+| x max-projection | +0.9869 / +0.9873 | +0.9867 / +0.9876 |
+| y max-projection | +0.9833 / +0.9849 | +0.9836 / +0.9851 |
+| z max-projection | +0.9828 / +0.9903 | +0.9819 / +0.9904 |
+
+Two independent runs of the port land within 0.001 of each other on
+every metric against the published cube, so the run-to-run spread
+(caveat 2 above) is far below the accepted bar. Report and projections:
+second-export/. A direct port-vs-port self-correlation run remains the
+recommended follow-up.

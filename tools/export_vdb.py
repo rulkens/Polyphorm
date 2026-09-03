@@ -15,7 +15,7 @@ macOS PyPI wheel. One-time setup used for this repo (venv at .venv/):
 
     brew install openvdb                     # libopenvdb + deps
     python3 -m venv .venv
-    .venv/bin/pip install numpy nanobind
+    .venv/bin/pip install -r requirements.txt nanobind
     git clone --depth 1 --branch v13.0.0 \
         https://github.com/AcademySoftwareFoundation/openvdb /tmp/openvdb
     cmake -S /tmp/openvdb -B /tmp/openvdb-py \

@@ -20,7 +20,7 @@ machine; the heaviest run (10M agents on the 1200 grid) peaks at about
 
 - Xcode Command Line Tools: `xcode-select --install`
 - CMake 3.24 or newer, plus git: `brew install cmake`
-- Python 3 with numpy, only needed for packing datasets
+- Python 3.11 or newer for the offline tools (see Python environment)
 - Network access during the first CMake configure
 
 There is no depot_tools setup and no manual Dawn checkout. CMake pulls
@@ -54,26 +54,41 @@ commit. `energy_smoke` runs a real 400-iteration headless simulation on
 a synthetic dataset and is slower on its first run after a build
 because the Metal shader cache is cold.
 
+## Python environment
+
+Every Python tool in `tools/` runs from the repo-local `.venv`, and
+every command in this document invokes it as `.venv/bin/python`. Create
+it once:
+
+```sh
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+```
+
+That covers packing, validation and reference extraction. The Blender
+exporter additionally needs the `openvdb` module built from source into
+the same venv; the recipe is in the `tools/export_vdb.py` docstring.
+
 ## Datasets
 
-No data ships in the repo; `bin/data/` is gitignored. The input format
-is unchanged from upstream Polyphorm: a `.bin` of float32 XYZW records
-and the positional `_metadata.txt` with point count, extrema and mean
-weight. The binary runs with `bin/` as working directory and reads
-`config.polyp` from there.
+The input format is unchanged from upstream Polyphorm: a `.bin` of
+float32 XYZW records and the positional `_metadata.txt` with point
+count, extrema and mean weight. The binary runs with `bin/` as working
+directory and reads `config.polyp` from there. `bin/data/` is tracked;
+derived packs and large fetched files are gitignored per subfolder.
 
 Three catalogs are in use on this branch:
 
 - `data/SDSS/galaxiesInSdssSlice_viz_bigger_lumdist_t=0.0`, the 37,655
-  galaxy viz slice shipped with upstream Polyphorm. An existing copy of
-  the upstream data pair drops into `bin/data/SDSS/` as-is.
+  galaxy viz slice shipped with upstream Polyphorm, tracked in the repo.
 - `data/SDSS/sdssGalaxy_rsdCorr_dbscan_e2p0ms3_dz0p001_m10p0_t=0.0`,
-  the full VAC catalog (324,901 galaxies, the validation input). Packed
-  from PolyPhy's `sample_3D_linW.csv`:
+  the full VAC catalog (324,901 galaxies, the validation input). Not
+  tracked; packed in seconds from the vendored
+  `bin/data/reference/sample_3D_linW.csv`:
 
   ```sh
-  python3 tools/pack_vac_catalog.py                 # defaults do the right thing
-  python3 tools/pack_vac_catalog.py --verify-grid   # predict the C++ grid fit (712x1200x728)
+  .venv/bin/python tools/pack_vac_catalog.py                 # defaults do the right thing
+  .venv/bin/python tools/pack_vac_catalog.py --verify-grid   # predict the C++ grid fit (712x1200x728)
   ```
 
   The script hard-fails on point count and unit mismatches.
@@ -82,8 +97,13 @@ Three catalogs are in use on this branch:
   with the generic packer:
 
   ```sh
-  python3 tools/pack_catalog.py --csv path/to/catalog.csv --out bin/data/2MRS/2mrs_gui
+  .venv/bin/python tools/pack_catalog.py --csv path/to/catalog.csv --out bin/data/2MRS/2mrs_gui
   ```
+
+`bin/data/reference/` holds the validation inputs that did not originate
+here, byte-identical to their public sources: the VAC input catalog,
+the VAC's own `export_metadata.txt`, and the d8 reference cube. Its
+`README.md` records provenance, checksums and lineage.
 
 `bin/config.polyp` is tracked and holds the validation configuration:
 10M agents, grid resolution 1200, padding 0.1, which auto-fits the VAC
@@ -173,20 +193,40 @@ OpenVDB v13 source against a brew `openvdb` into the repo-local
 
 ## Validation against the published VAC
 
+The full chain from a clean checkout, after the build and the Python
+environment above:
+
 ```sh
+.venv/bin/python tools/pack_vac_catalog.py                    # 1. pack the catalog
+(cd bin && ../build/polyphorm --headless 1000 --export \
+    --dataset data/SDSS/sdssGalaxy_rsdCorr_dbscan_e2p0ms3_dz0p001_m10p0_t=0.0)  # 2. ~5 min
 .venv/bin/python tools/validate/compare_trace.py \
-    --export-dir bin/export/<timestamp> \
-    --reference ~/Development/js/skymap/data/raw/mcpm/mcpm_sdss_d8.npy \
-    --out /tmp/report
+    --export-dir bin/export/<timestamp> --out reports/<name>  # 3. compare
 ```
 
-Block-averages the export to the reference's d8 grid (89x150x91),
-compares log10(x+1e-3) via Pearson (3D plus axis max-projections,
-masked and unmasked), renders sanity projections, and prints numbers
-without a pass/fail verdict. `--orientation-scan` re-runs the 8-flip
-axis check (identity must win). The reference path above is where the
-published VAC d8 grid lives on the development machine; point it at
-your own copy. The M5 record and accepted numbers live in
+Step 2 must use the binary directly with the tracked `config.polyp`
+(10M agents, grid 1200, padding 0.1). `run_sdss.sh` is a GUI
+convenience that starts at 1M agents, which also applies headless, so
+it is not a substitute here unless `--agents 10000000` is passed.
+
+Step 3 block-averages the export to the reference's d8 grid
+(89x150x91), compares log10(x+1e-3) via Pearson (3D plus axis
+max-projections, masked and unmasked), renders sanity projections, and
+prints numbers without a pass/fail verdict. The reference defaults to
+the vendored `bin/data/reference/mcpm_sdss_d8.npy`. `--orientation-scan`
+re-runs the 8-flip axis check (identity must win);
+`--self-test` checks the tool against synthetic cubes and the
+reference itself.
+
+To re-derive the reference cube from the SDSS archive instead of
+trusting the vendored copy:
+
+```sh
+.venv/bin/python tools/validate/download_vac.py        # 345 MB from data.sdss.org, sha1-verified
+.venv/bin/python tools/validate/extract_reference.py   # ~1 min, 10 GB RAM, checks SHA256SUMS
+```
+
+The M5 record and accepted numbers live in
 `docs/superpowers/research/m5/m5-run-log.md` and
 `docs/superpowers/research/m5/first-measurement/`.
 

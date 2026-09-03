@@ -6,3 +6,6 @@ build/
 
 # Python venv for offline tools (OpenVDB export)
 /.venv/
+
+# Local validation reports (tools/validate/compare_trace.py --out reports/<name>)
+/reports/

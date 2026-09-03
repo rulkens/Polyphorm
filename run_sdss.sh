@@ -2,7 +2,9 @@
 # Launch the Polyphorm GUI on the SDSS data.
 # Default: full VAC catalog (324,901 galaxies). Pass --quick for the
 # smaller upstream viz slice (37,655 galaxies). Extra args are forwarded
-# to the binary (e.g. --headless 1000 --export).
+# to the binary. Note the 1M-agent start below also applies to headless
+# runs; for the validation protocol invoke the binary directly (see
+# docs/RUNNING.md, "Validation against the published VAC").
 set -e
 cd "$(dirname "$0")/bin"
 
