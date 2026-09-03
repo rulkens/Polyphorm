@@ -1,0 +1,7 @@
+# Fetched / derived by tools/validate/*.py — never committed.
+/trace.bin.bz2
+/trace.bin
+/mcpm_sdss_d4.npy
+/mcpm_sdss_d2.npy
+/*.sha1sum
+/*.part

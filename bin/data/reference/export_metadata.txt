@@ -1,0 +1,16 @@
+dataset: data/SDSS/sdssGalaxy_rsdCorr_dbscan_e2p0ms3_dz0p001_m10p0_t=0.0
+number of data points: 324849
+number of agents: 10M
+simulation grid resolution: 712 x 1200 x 728 [vox]
+simulation grid size: 556.288 x 937.564 x 568.789 [mpc]
+simulation grid center: (-239.469, -16.5618, 201.275) [mpc]
+
+move distance: 0.1 [mpc]
+move distance grid: 0.127991 [vox]
+sense distance: 4.6 [mpc]
+sense distance grid: 5.8876 [vox]
+move spread: 10 [deg]
+sense spread: 20 [deg]
+persistence coefficient: 0.8
+agent deposit: 0
+sampling sharpness: 2.5
