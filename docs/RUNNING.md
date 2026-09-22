@@ -259,7 +259,7 @@ the upstream repo.
 
 Inside the bundle, `cpplib/resources.cpp` switches the binary to
 bundle mode: it reads from `Contents/Resources` and writes exports,
-`imgui.ini` and the launcher log to `~/Documents/Polyphorm`. Outside a
+`imgui.ini` and the launcher log to `~/Polyphorm`. Outside a
 bundle nothing changes. `packaging/macos/` holds the `Info.plist`, the
 launcher script (a dataset picker on double-click, argument passthrough
 from a terminal) and the README that ships in the zip, which explains

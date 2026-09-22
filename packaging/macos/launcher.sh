@@ -3,11 +3,11 @@
 # dataset to load; run from a terminal with arguments it forwards them
 # straight to the real binary, e.g.
 #   Polyphorm.app/Contents/MacOS/Polyphorm --dataset /path/to/mydata --agents 2000000
-# Output (Finder launches only) goes to ~/Documents/Polyphorm/polyphorm.log.
+# Output (Finder launches only) goes to ~/Polyphorm/polyphorm.log.
 HERE="$(cd "$(dirname "$0")" && pwd)"
 BIN="$HERE/polyphorm-bin"
 RES="$HERE/../Resources"
-OUT="$HOME/Documents/Polyphorm"
+OUT="$HOME/Polyphorm"
 AGENTS=1000000
 
 # Old macOS versions pass a -psn_* process serial number on Finder launch.
@@ -17,13 +17,17 @@ if [ $# -gt 0 ]; then
     exec "$BIN" "$@"
 fi
 
-mkdir -p "$OUT"
-exec >>"$OUT/polyphorm.log" 2>&1
-echo "=== $(date) ==="
-
 dialog() {
     osascript -e "display dialog \"$1\" with title \"Polyphorm\" buttons {\"OK\"} default button 1 with icon caution" >/dev/null 2>&1
 }
+
+# Never die silently on a Finder launch: say why if the log can't be written.
+if ! { mkdir -p "$OUT" && : >>"$OUT/polyphorm.log"; } 2>/dev/null; then
+    dialog "Polyphorm cannot write to $OUT (needed for its log and exports). Check that the folder is writable."
+    exit 1
+fi
+exec >>"$OUT/polyphorm.log" 2>&1
+echo "=== $(date) ==="
 
 CHOICE=$(osascript <<'EOF'
 set opts to {"2MRS — 34,974 galaxies (all-sky)", "SDSS — 324,901 galaxies (full)", "SDSS — 37,655 galaxies (quick slice)", "Open my own dataset…"}
@@ -58,6 +62,6 @@ echo "dataset: $DATASET"
 "$BIN" --dataset "$DATASET" --agents "$AGENTS"
 STATUS=$?
 if [ $STATUS -ne 0 ]; then
-    dialog "Polyphorm exited with an error (code $STATUS). Details are in ~/Documents/Polyphorm/polyphorm.log"
+    dialog "Polyphorm exited with an error (code $STATUS). Details are in ~/Polyphorm/polyphorm.log"
 fi
 exit $STATUS

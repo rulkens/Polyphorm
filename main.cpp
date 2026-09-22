@@ -382,7 +382,7 @@ int main(int argc, char **argv)
     }
     const bool headless = headless_frames > 0;
     // Release: inside Polyphorm.app, read from Contents/Resources and write
-    // to ~/Documents/Polyphorm (see cpplib/resources.h). No-op in dev.
+    // to ~/Polyphorm (see cpplib/resources.h). No-op in dev.
     resources::init(&dataset_override);
 
     // Load configuration file

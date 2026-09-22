@@ -12,9 +12,9 @@
 // Bundle mode (<exe>/../Resources/shaders exists): shaders, palettes,
 // config.polyp and data/ are read from Contents/Resources, and the process
 // chdirs there so the upstream cwd-relative reads keep working. Everything
-// the app writes (export/, capture/, imgui.ini) goes to
-// ~/Documents/Polyphorm instead — never into the (signed, possibly
-// read-only translocated) bundle.
+// the app writes (export/, capture/, imgui.ini) goes to ~/Polyphorm
+// instead — never into the (signed, possibly read-only translocated)
+// bundle, and not ~/Documents, which is privacy-protected (TCC).
 namespace resources
 {
     // Call first thing in main(). May rewrite *dataset_path to an absolute

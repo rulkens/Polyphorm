@@ -42,7 +42,11 @@ void resources::init(const char **dataset_path)
     g_shader_root = (res / "shaders").string();
     g_data_root = res.string();
     const char *home = getenv("HOME");
-    g_output_root = (fs::path(home ? home : "/tmp") / "Documents" / "Polyphorm").string();
+    // ~/Polyphorm, not ~/Documents/Polyphorm: Documents is TCC-protected,
+    // and an ad-hoc signed app gets a new code identity on every rebuild,
+    // so a granted Documents permission silently stops applying and every
+    // write fails with EPERM.
+    g_output_root = (fs::path(home ? home : "/tmp") / "Polyphorm").string();
 
     // A --dataset given relative to where the user launched from must
     // survive the chdir below; bundled "data/..." paths resolve against
@@ -72,7 +76,7 @@ std::string resources::output(const char *rel_path)
 {
     if (g_output_root.empty()) return rel_path;
     // Make the parent folder too: upstream relied on bin/export/ and
-    // bin/capture/ already existing, which a fresh ~/Documents/Polyphorm
+    // bin/capture/ already existing, which a fresh ~/Polyphorm
     // does not have.
     fs::path p = fs::path(g_output_root) / rel_path;
     std::error_code ec;

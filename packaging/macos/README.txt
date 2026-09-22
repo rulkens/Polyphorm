@@ -46,7 +46,7 @@ F8 clears the trace; left-drag orbits, right-drag pans, scroll zooms.
 
 Output
 ------
-Everything the app writes goes to ~/Documents/Polyphorm:
+Everything the app writes goes to ~/Polyphorm:
 
   - export/YYYY-MM-DD_HH-MM-SS/  (F6) trace.bin + deposit.bin (headerless
     float16 volumes, index = z*W*H + y*W + x), export_metadata.txt with
@@ -65,7 +65,10 @@ one from a CSV with four columns x,y,z,weight and no header row:
   python3 -m pip install numpy
   python3 pack_catalog.py --csv mygalaxies.csv --out mygalaxies
 
-Then choose "Open my own dataset" and pick mygalaxies.bin.
+Then choose "Open my own dataset" and pick mygalaxies.bin. If the file is
+in Documents, Desktop or Downloads, macOS asks whether Polyphorm may
+access that folder; allow it. Keeping datasets in ~/Polyphorm avoids the
+question entirely.
 
 Command line
 ------------
@@ -76,4 +79,4 @@ build:
   /Applications/Polyphorm.app/Contents/MacOS/Polyphorm --headless 1000 --export --dataset mygalaxies
 
 --headless N runs N iterations without a window; --export writes an
-export at the end (to ~/Documents/Polyphorm/export).
+export at the end (to ~/Polyphorm/export).
