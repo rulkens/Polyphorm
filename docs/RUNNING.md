@@ -20,6 +20,7 @@ machine; the heaviest run (10M agents on the 1200 grid) peaks at about
 
 - Xcode Command Line Tools: `xcode-select --install`
 - CMake 3.24 or newer, plus git: `brew install cmake`
+- Ninja, for release packaging only: `brew install ninja`
 - Python 3.11 or newer for the offline tools (see Python environment)
 - Network access during the first CMake configure
 
@@ -235,7 +236,13 @@ The M5 record and accepted numbers live in
 ## Packaging a release
 
 `tools/package_macos.sh <tag>` builds a standalone `Polyphorm.app`
-(Apple Silicon, macOS 13+) and zips it for a GitHub release:
+(Apple Silicon, macOS 13+) and zips it for a GitHub release. On a
+fresh machine it needs the Prerequisites above (including Ninja) and
+the Python venv: the full SDSS catalog is not tracked in git, and the
+script regenerates it byte-identically from the vendored VAC CSV with
+`tools/pack_vac_catalog.py`. Without an existing `build/` it fetches
+and builds Dawn itself, so budget the same 10-20 minutes plus up to an
+hour as a first build.
 
 ```sh
 tools/package_macos.sh v1.2-macos-port

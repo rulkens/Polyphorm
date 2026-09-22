@@ -28,6 +28,16 @@ data/SDSS/galaxiesInSdssSlice_viz_bigger_lumdist_t=0.0
 
 cd "$ROOT"
 
+# Fail early with the fix, not halfway through an hour-long build.
+command -v cmake >/dev/null || { echo "cmake not found: brew install cmake" >&2; exit 1; }
+command -v ninja >/dev/null || { echo "ninja not found: brew install ninja" >&2; exit 1; }
+SDSS_FULL="bin/data/SDSS/sdssGalaxy_rsdCorr_dbscan_e2p0ms3_dz0p001_m10p0_t=0.0"
+if [ ! -f "$SDSS_FULL.bin" ] && ! "$ROOT/.venv/bin/python" -c "import numpy" 2>/dev/null; then
+    echo "$SDSS_FULL.bin is not in git and must be regenerated, which needs the" >&2
+    echo "repo venv: python3 -m venv .venv && .venv/bin/pip install -r requirements.txt" >&2
+    exit 1
+fi
+
 echo "==> configure + build ($BUILD)"
 DEPS=""
 [ -d build/_deps/dawn-src ] && DEPS="$DEPS -DFETCHCONTENT_SOURCE_DIR_DAWN=$ROOT/build/_deps/dawn-src"
@@ -38,7 +48,6 @@ cmake -S . -B "$BUILD" -G Ninja -DCMAKE_BUILD_TYPE=Release \
 cmake --build "$BUILD" --target polyphorm -j "$(sysctl -n hw.ncpu)"
 
 echo "==> datasets"
-SDSS_FULL="bin/data/SDSS/sdssGalaxy_rsdCorr_dbscan_e2p0ms3_dz0p001_m10p0_t=0.0"
 if [ ! -f "$SDSS_FULL.bin" ]; then
     echo "   $SDSS_FULL.bin is not tracked in git; regenerating from the vendored VAC CSV"
     "$ROOT/.venv/bin/python" tools/pack_vac_catalog.py
