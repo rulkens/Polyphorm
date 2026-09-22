@@ -10,6 +10,7 @@
 #include "ui.h"
 #include "graphics.h"
 #include "platform.h"
+#include "resources.h"
 
 #include <imgui.h>
 #include <backends/imgui_impl_glfw.h>
@@ -77,6 +78,12 @@ void init(float, float) {
     if (!graphics_context) return;
 
     ImGui::CreateContext();
+    // Bundle mode: keep imgui.ini out of the signed .app (cwd there is
+    // Contents/Resources). Dev mode keeps ImGui's default cwd-relative file.
+    if (resources::is_bundle()) {
+        static std::string ini_path = resources::output("imgui.ini");
+        ImGui::GetIO().IniFilename = ini_path.c_str();
+    }
     ImGui_ImplGlfw_InitForOther(platform::get_glfw_window(), true);
 
     ImGui_ImplWGPU_InitInfo info = {};

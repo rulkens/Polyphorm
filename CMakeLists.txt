@@ -89,6 +89,7 @@ add_executable(polyphorm
   cpplib/gpu/gpu_context.cpp
   cpplib/graphics.cpp
   cpplib/ui.cpp
+  cpplib/resources.cpp
 )
 target_include_directories(polyphorm PRIVATE cpplib)
 target_link_libraries(polyphorm PRIVATE imgui webgpu_dawn webgpu_glfw glfw)

@@ -8,6 +8,7 @@
 #include "random.h"
 #include <cassert>
 #include "logging.h"
+#include "resources.h"
 #include <cstddef>
 #include <cstring>
 #include <cstdlib>
@@ -380,6 +381,9 @@ int main(int argc, char **argv)
         if (strcmp(argv[i], "--agents") == 0 && i + 1 < argc) agents_override = atoi(argv[i + 1]);
     }
     const bool headless = headless_frames > 0;
+    // Release: inside Polyphorm.app, read from Contents/Resources and write
+    // to ~/Documents/Polyphorm (see cpplib/resources.h). No-op in dev.
+    resources::init(&dataset_override);
 
     // Load configuration file
     std::ifstream config_file;
@@ -521,11 +525,11 @@ int main(int argc, char **argv)
         printf("%s compiled...\n", path);
         return cs;
     };
-    ComputeShader compute_shader = load_compute(SHADER_ROOT "/cs_agents_propagate.wgsl");
-    ComputeShader decay_compute_shader = load_compute(SHADER_ROOT "/cs_field_decay.wgsl");
-    ComputeShader cs_density_histo = load_compute(SHADER_ROOT "/cs_density_histo.wgsl");
-    ComputeShader draw_compute_shader_particle = load_compute(SHADER_ROOT "/cs_particles_transform.wgsl");
-    ComputeShader blit_compute_shader = load_compute(SHADER_ROOT "/cs_particles_blit.wgsl");
+    ComputeShader compute_shader = load_compute(resources::shader("cs_agents_propagate.wgsl").c_str());
+    ComputeShader decay_compute_shader = load_compute(resources::shader("cs_field_decay.wgsl").c_str());
+    ComputeShader cs_density_histo = load_compute(resources::shader("cs_density_histo.wgsl").c_str());
+    ComputeShader draw_compute_shader_particle = load_compute(resources::shader("cs_particles_transform.wgsl").c_str());
+    ComputeShader blit_compute_shader = load_compute(resources::shader("cs_particles_blit.wgsl").c_str());
 
     auto load_vs = [](const char *path) {
         File f = file_system::read_file(path);
@@ -545,21 +549,21 @@ int main(int argc, char **argv)
         printf("%s compiled...\n", path);
         return ps;
     };
-    VertexShader vertex_shader_2d = load_vs(SHADER_ROOT "/vs_2d.wgsl");
-    PixelShader pixel_shader_2d = load_ps(SHADER_ROOT "/ps_particles_color.wgsl");
+    VertexShader vertex_shader_2d = load_vs(resources::shader("vs_2d.wgsl").c_str());
+    PixelShader pixel_shader_2d = load_ps(resources::shader("ps_particles_color.wgsl").c_str());
 
     // M3: cs_agents_sort (upstream default-off)
     // M4b: only sort_shader (upstream default-off) and the two file-parity
     // PS ports (ps_volume_halocolor, ps_volume_velocity) remain unwired.
     ComputeShader sort_shader = {};
-    ComputeShader cs_volpath = load_compute(SHADER_ROOT "/cs_volpath.wgsl");
-    ComputeShader cs_volpath_blit = load_compute(SHADER_ROOT "/cs_volpath_blit.wgsl");
-    VertexShader vertex_shader = load_vs(SHADER_ROOT "/vs_3d.wgsl");
-    PixelShader pixel_shader = load_ps(SHADER_ROOT "/ps_volume_trace.wgsl"),
-                ps_volume_highlight = load_ps(SHADER_ROOT "/ps_volume_highlight.wgsl"),
+    ComputeShader cs_volpath = load_compute(resources::shader("cs_volpath.wgsl").c_str());
+    ComputeShader cs_volpath_blit = load_compute(resources::shader("cs_volpath_blit.wgsl").c_str());
+    VertexShader vertex_shader = load_vs(resources::shader("vs_3d.wgsl").c_str());
+    PixelShader pixel_shader = load_ps(resources::shader("ps_volume_trace.wgsl").c_str()),
+                ps_volume_highlight = load_ps(resources::shader("ps_volume_highlight.wgsl").c_str()),
                 ps_volume_halocolor = {},
-                ps_volume_overdensity = load_ps(SHADER_ROOT "/ps_volume_overdensity.wgsl"),
-                ps_volume_velocity = {}, ps_volpath = load_ps(SHADER_ROOT "/ps_volpath.wgsl");
+                ps_volume_overdensity = load_ps(resources::shader("ps_volume_overdensity.wgsl").c_str()),
+                ps_volume_velocity = {}, ps_volpath = load_ps(resources::shader("ps_volpath.wgsl").c_str());
 
     // Textures for the simulation
     #ifdef HALO_COLOR_ANALYSIS
@@ -579,9 +583,9 @@ int main(int argc, char **argv)
     Texture3D trace_tex  = graphics::get_texture3D(NULL, GRID_RESOLUTION_X, GRID_RESOLUTION_Y, GRID_RESOLUTION_Z, graphics::Format::R32_FLOAT, 4);
     #endif
     Texture2D display_tex = graphics::get_texture2D(NULL, window_width, window_height, graphics::Format::RGBA32_FLOAT, 16);      // M3: framebuffer-vs-logical decision
-    // DATA_ROOT mirrors SHADER_ROOT's absolute-path fix — the M3 gate recipe runs from /tmp/polyviz with no data/ subdir (design §4)
-    Texture2D palette_trace_tex = graphics::load_texture2D(DATA_ROOT "/" COLOR_PALETTE_TRACE);
-    Texture2D palette_data_tex = graphics::load_texture2D(DATA_ROOT "/" COLOR_PALETTE_DATA);
+    // Palettes resolve via resources::data — DATA_ROOT in dev (the M3 gate recipe runs from /tmp/polyviz with no data/ subdir, design §4), Contents/Resources in the app bundle
+    Texture2D palette_trace_tex = graphics::load_texture2D(resources::data(COLOR_PALETTE_TRACE).c_str());
+    Texture2D palette_data_tex = graphics::load_texture2D(resources::data(COLOR_PALETTE_DATA).c_str());
 
     TextureSampler tex_sampler_trace = graphics::get_texture_sampler(graphics::CLAMP, graphics::Filter::ANISOTROPIC);
     TextureSampler tex_sampler_deposit = graphics::get_texture_sampler(graphics::CLAMP, graphics::Filter::ANISOTROPIC);
@@ -1223,7 +1227,7 @@ int main(int argc, char **argv)
             char export_timestamp[32];
             time_t export_now = time(nullptr);
             strftime(export_timestamp, sizeof(export_timestamp), "%Y-%m-%d_%H-%M-%S", localtime(&export_now));
-            std::string export_dir = std::string("export/") + export_timestamp;
+            std::string export_dir = resources::output("export/") + export_timestamp;
             std::filesystem::create_directories(export_dir);
             printf("Exporting simulation data to %s/ ...\n", export_dir.c_str());
             if (is_a)
@@ -1287,7 +1291,7 @@ int main(int argc, char **argv)
             if (first_time_capture) {
                 first_time_capture = false;
                 std::ofstream agents;
-                agents.open("export/agents.txt", std::ofstream::out);
+                agents.open(resources::output("export/agents.txt"), std::ofstream::out);
                 agents.close();
             }
 
@@ -1304,7 +1308,7 @@ int main(int argc, char **argv)
                 graphics::capture_structured_buffer(&particles_buffer_z, particles_z, active_particles, sizeof(float));
                 graphics::capture_structured_buffer(&particles_buffer_weights, particles_weights, active_particles, sizeof(float));
                 std::ofstream agents;
-                agents.open("export/agents.txt", std::ofstream::out | std::ofstream::app);
+                agents.open(resources::output("export/agents.txt"), std::ofstream::out | std::ofstream::app);
                 agents << "*** timestep " << timestep_counter << " [X Y Z D] ***" << std::endl;
                 agents.precision(7);
                 for (int i = data_count; i < active_particles; ++i) {
@@ -1662,7 +1666,7 @@ int main(int argc, char **argv)
         if (!headless && is_running && make_screenshot) {
             uint32_t frame_number = graphics::capture_current_frame();
             std::stringstream stream;
-	        stream << "capture/frame" << frame_number;
+	        stream << resources::output("capture/frame") << frame_number;
             graphics::save_texture2D_HDR(&display_tex, stream.str());
             make_screenshot = false;
         }
