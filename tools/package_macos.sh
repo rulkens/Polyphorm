@@ -1,17 +1,19 @@
 #!/bin/sh
 # Build a distributable Polyphorm.app (Apple Silicon, macOS 13+) and zip it.
 #
-#   tools/package_macos.sh v1.2-macos-port
+#   tools/package_macos.sh v1.2.0-alpha
 #
-# Output: dist/Polyphorm-<version>-macos-arm64.zip (v1.2-macos-port ->
-# 1.2) containing Polyphorm.app, README.txt and pack_catalog.py. Uses a separate build-release/ tree
+# Output: dist/Polyphorm-<version>-macos-arm64.zip (v1.2.0-alpha ->
+# 1.2.0-alpha) containing Polyphorm.app, README.txt and pack_catalog.py.
+# Info.plist gets the numeric part only (1.2.0), as macOS expects. Uses a separate build-release/ tree
 # (deployment target 13.0) that reuses build/'s Dawn and ImGui checkouts,
 # so the dev build/ is untouched. The app is ad-hoc signed only; see
 # packaging/macos/README.txt for the first-launch Gatekeeper steps.
 set -eu
 
-TAG="${1:?usage: tools/package_macos.sh <tag, e.g. v1.2-macos-port>}"
+TAG="${1:?usage: tools/package_macos.sh <tag, e.g. v1.2.0-alpha>}"
 VERSION="$(echo "$TAG" | sed -E 's/^v//; s/-macos-port$//')"
+PLIST_VERSION="$(echo "$VERSION" | sed -E 's/^([0-9]+(\.[0-9]+)*).*/\1/')"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD="$ROOT/build-release"
 DIST="$ROOT/dist"
@@ -59,7 +61,7 @@ done
 echo "==> assemble $APP"
 rm -rf "$STAGE" "$ZIP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources/shaders" "$APP/Contents/Resources/data"
-sed "s/@VERSION@/$VERSION/g" packaging/macos/Info.plist > "$APP/Contents/Info.plist"
+sed "s/@VERSION@/$PLIST_VERSION/g" packaging/macos/Info.plist > "$APP/Contents/Info.plist"
 install -m 755 packaging/macos/launcher.sh "$APP/Contents/MacOS/Polyphorm"
 install -m 755 "$BUILD/polyphorm" "$APP/Contents/MacOS/polyphorm-bin"
 cp shaders/*.wgsl "$APP/Contents/Resources/shaders/"
@@ -69,7 +71,10 @@ for d in $DATASETS; do
     mkdir -p "$APP/Contents/Resources/$(dirname "$d")"
     cp "bin/$d.bin" "bin/${d}_metadata.txt" "$APP/Contents/Resources/$(dirname "$d")/"
 done
-sed "s/@VERSION@/$VERSION/g; s/@TAG@/$TAG/g" packaging/macos/README.txt > "$STAGE/README.txt"
+# Underline the title to its substituted length.
+sed "s/@VERSION@/$VERSION/g; s/@TAG@/$TAG/g" packaging/macos/README.txt \
+    | awk 'NR == 1 { t = length($0) } NR == 2 { s = ""; for (i = 0; i < t; i++) s = s "="; print s; next } { print }' \
+    > "$STAGE/README.txt"
 cp tools/pack_catalog.py "$STAGE/"
 
 echo "==> ad-hoc sign"

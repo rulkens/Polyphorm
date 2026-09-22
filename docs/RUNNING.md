@@ -269,9 +269,9 @@ and builds Dawn itself, so budget the same 10-20 minutes plus up to an
 hour as a first build.
 
 ```sh
-tools/package_macos.sh v1.2-macos-port
-gh release create v1.2-macos-port -R rulkens/Polyphorm \
-    --notes-file notes.md dist/Polyphorm-1.2-macos-arm64.zip
+tools/package_macos.sh v1.2.0-alpha
+gh release create v1.2.0-alpha -R rulkens/Polyphorm --prerelease \
+    --notes-file notes.md dist/Polyphorm-1.2.0-alpha-macos-arm64.zip
 ```
 
 It builds in a separate `build-release/` tree (deployment target 13.0,
