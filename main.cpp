@@ -847,9 +847,16 @@ int main(int argc, char **argv)
     };
     reset_eplot();
 
+    // Port QoL: while paused the trace does not change, so the histogram
+    // pass and its blocking readback are skipped and the last result is
+    // shown. False = the CPU copy must be refreshed on the next frame.
+    bool histogram_fresh = false;
+    int histogram_sample_mode = -1;
+
     // Full particles+trails reset — shared by the F2 key and the AGENT
     // COUNT combo (body unchanged from the upstream F2 handler).
     auto reset_particles_and_trails = [&]() {
+        histogram_fresh = false;
         update_particles(particles_x, particles_y, particles_z, particles_phi, particles_theta, particles_weights,
                         NUM_PARTICLES, GRID_RESOLUTION_X, GRID_RESOLUTION_Y, GRID_RESOLUTION_Z, WORLD_SIZE_X, WORLD_SIZE_Y, WORLD_SIZE_Z, WORLD_CENTER_X, WORLD_CENTER_Y, WORLD_CENTER_Z, mean_weight);
         graphics::update_structured_buffer(&particles_buffer_x, particles_x);
@@ -906,6 +913,7 @@ int main(int argc, char **argv)
         window_title.precision(3);
         window_title << "Polyphorm [ " << 1000.0 * sec_per_frame_amortized << " ms/frame";
         window_title << " | pass " << simulation_config.n_iteration;
+        if (!run_mold) window_title << " | PAUSED";
         if (vis_mode == VisualizationMode::VM_PATH_TRACING)
             window_title << " | " << rendering_config.pt_iteration << " spp";
         window_title << " ]";
@@ -1187,8 +1195,11 @@ int main(int argc, char **argv)
             graphics::unset_texture_compute(2);
         }
 
-        // Compute agent trace histogram
-        if (compute_histogram)
+        // Compute agent trace histogram (headless: run_mold is always on,
+        // so this refreshes every iteration exactly as before)
+        const bool refresh_histogram = compute_histogram &&
+            (run_mold || !histogram_fresh || histogram_sample_mode != statistics_config.sample_randomly);
+        if (refresh_histogram)
         {
             for (int i = 0; i < N_HISTOGRAM_BINS; ++i) {
                 density_histogram[i] = 0;
@@ -1510,7 +1521,11 @@ int main(int argc, char **argv)
         if (compute_histogram)
         {
             // Get histogram statistics
-            graphics::capture_structured_buffer(&density_histogram_buffer, density_histogram, N_HISTOGRAM_BINS, sizeof(unsigned int));
+            if (refresh_histogram) {
+                graphics::capture_structured_buffer(&density_histogram_buffer, density_histogram, N_HISTOGRAM_BINS, sizeof(unsigned int));
+                histogram_fresh = true;
+                histogram_sample_mode = statistics_config.sample_randomly;
+            }
             float norm_coef = float(density_histogram[0]);
             float energy = 0.0;
             for (int b = 1; b < N_HISTOGRAM_BINS-1; b++) {
@@ -1680,6 +1695,15 @@ int main(int argc, char **argv)
 
             Panel panel = ui::start_panel("", Vector2(0.0, 0.0), 1.0);
             const float smoothing_coef = 0.1;
+
+            // Port QoL: on-screen twin of F3. Pausing keeps the UI and the
+            // view responsive (no simulation step per frame).
+            {
+                char pause_label[64];
+                if (run_mold) snprintf(pause_label, sizeof(pause_label), "PAUSE  (F3)");
+                else          snprintf(pause_label, sizeof(pause_label), "RESUME  (paused at pass %d)", simulation_config.n_iteration);
+                if (ui::add_play_pause_button(&panel, run_mold, pause_label)) run_mold = !run_mold;
+            }
 
             float ss = math::rad2deg(simulation_config.sense_spread);
             reset_pt |= ui::add_slider(&panel, "SENSE ANGLE [DEG]", &ss, 0.0, 90.0);
@@ -1904,6 +1928,7 @@ int main(int argc, char **argv)
         if (run_mold) {
             ++simulation_config.n_iteration;
         }
+        if (run_mold || !compute_histogram) histogram_fresh = false;
         if (!headless) ui::end();   // guarantee exactly one ImGui Render per frame (design §4.2)
         if (!headless) graphics::swap_frames();
         // else: no swap chain to present to. capture_structured_buffer() in the

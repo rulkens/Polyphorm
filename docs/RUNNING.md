@@ -142,7 +142,12 @@ the app (collapsed by default). The important ones: F1 toggles the UI,
 F2 does a full reset, F3 pauses, F6 exports, F8 clears the trace;
 left-drag orbits, right-drag pans, scroll zooms.
 
-Two things help interactive frame rates: the AGENT COUNT dropdown
+The PAUSE / RESUME button at the top of the main panel is the
+on-screen twin of F3. While paused, no simulation step runs and the
+trace histogram is not recomputed (the trace cannot change), so the UI
+and camera run at the render's own frame rate.
+
+Two things help interactive frame rates while the simulation runs: the AGENT COUNT dropdown
 (1M-10M, frame cost is roughly linear, switching does a full reset) and
 turning TRACE HISTOGRAM off, which skips a blocking GPU readback every
 frame.

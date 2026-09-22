@@ -39,6 +39,9 @@ namespace ui
     void add_text(Panel *panel, const char *text);
     // Port addition: dropdown; returns true when the selection changes.
     bool add_combo(Panel *panel, char *label, int *index, const char *const items[], int count);
+    // Port addition: full-width button with a drawn pause (running) or play
+    // (paused) icon before the label; returns true when clicked.
+    bool add_play_pause_button(Panel *panel, bool running, const char *label);
 
     void release();
 

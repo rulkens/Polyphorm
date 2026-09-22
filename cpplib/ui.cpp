@@ -201,6 +201,35 @@ bool add_combo(Panel *, char *label, int *index, const char *const items[], int 
     return ImGui::Combo(label, index, items, count);
 }
 
+bool add_play_pause_button(Panel *, bool running, const char *label) {
+    ensure_frame_open();
+    // The default ImGui font has no media glyphs, so the icon is drawn:
+    // a normal full-width button with left padding reserved for it.
+    const float h = ImGui::GetFrameHeight();
+    const float icon = h * 0.45f;
+    ImGuiStyle &style = ImGui::GetStyle();
+    ImVec2 pad_saved = style.FramePadding;
+    style.FramePadding.x += icon + pad_saved.x;
+    ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.0f, 0.5f));
+    bool clicked = ImGui::Button(label, ImVec2(-FLT_MIN, 0.0f));
+    ImGui::PopStyleVar();
+    style.FramePadding = pad_saved;
+
+    ImDrawList *dl = ImGui::GetWindowDrawList();
+    ImU32 col = ImGui::GetColorU32(ImGuiCol_Text);
+    ImVec2 r = ImGui::GetItemRectMin();
+    float x = r.x + pad_saved.x + 1.0f;
+    float y = r.y + (h - icon) * 0.5f;
+    if (running) {   // pause: two bars
+        float bar = icon * 0.34f;
+        dl->AddRectFilled(ImVec2(x, y), ImVec2(x + bar, y + icon), col);
+        dl->AddRectFilled(ImVec2(x + icon - bar, y), ImVec2(x + icon, y + icon), col);
+    } else {         // play: right-pointing triangle
+        dl->AddTriangleFilled(ImVec2(x, y), ImVec2(x, y + icon), ImVec2(x + icon, y + icon * 0.5f), col);
+    }
+    return clicked;
+}
+
 void release() {
     graphics::set_frame_end_hook(nullptr);   // defensive: no dangling callback into torn-down ImGui state
     ImGui_ImplWGPU_Shutdown();
