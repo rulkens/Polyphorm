@@ -9,3 +9,7 @@ build/
 
 # Local validation reports (tools/validate/compare_trace.py --out reports/<name>)
 /reports/
+
+# Release packaging (tools/package_macos.sh)
+/build-release/
+/dist/

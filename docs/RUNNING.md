@@ -232,6 +232,32 @@ The M5 record and accepted numbers live in
 `docs/superpowers/research/m5/m5-run-log.md` and
 `docs/superpowers/research/m5/first-measurement/`.
 
+## Packaging a release
+
+`tools/package_macos.sh <tag>` builds a standalone `Polyphorm.app`
+(Apple Silicon, macOS 13+) and zips it for a GitHub release:
+
+```sh
+tools/package_macos.sh v1.2-macos-port
+gh release create v1.2-macos-port -R rulkens/Polyphorm \
+    --notes-file notes.md dist/Polyphorm-1.2-macos-arm64.zip
+```
+
+It builds in a separate `build-release/` tree (deployment target 13.0,
+reusing `build/`'s Dawn and ImGui sources), bundles the WGSL shaders,
+`config.polyp`, the palettes and the 2MRS and SDSS datasets into
+`Contents/Resources`, and ad-hoc signs the result. Pass `-R
+rulkens/Polyphorm` to `gh`: in this checkout it otherwise defaults to
+the upstream repo.
+
+Inside the bundle, `cpplib/resources.cpp` switches the binary to
+bundle mode: it reads from `Contents/Resources` and writes exports,
+`imgui.ini` and the launcher log to `~/Documents/Polyphorm`. Outside a
+bundle nothing changes. `packaging/macos/` holds the `Info.plist`, the
+launcher script (a dataset picker on double-click, argument passthrough
+from a terminal) and the README that ships in the zip, which explains
+the one-time Gatekeeper "Open Anyway" step for the unsigned app.
+
 ## Known issues
 
 - A frame currently takes about 300 ms at 10M agents on the native VAC
