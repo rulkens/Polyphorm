@@ -12,6 +12,8 @@
 #include "platform.h"
 #include "resources.h"
 
+#include <cstring>
+
 #include <imgui.h>
 #include <backends/imgui_impl_glfw.h>
 #include <backends/imgui_impl_wgpu.h>
@@ -131,7 +133,19 @@ Panel start_panel(char *name, Vector2 pos, float width) {
     // §3.2.1 quirk note: pos/width are deliberately NOT used to size/position
     // the ImGui window — the old D3D11 adapter's 1px-wide-background-rect
     // quirk is not reproduced. ImGui auto-sizes/auto-positions instead.
-    ImGui::Begin(*name ? name : "Polyphorm");
+    const char *title = *name ? name : "Polyphorm";
+    // First-launch layout (no imgui.ini yet): main panel top-left with
+    // SHORTCUTS stacked below it, instead of ImGui's default of every
+    // window at 60,60 overlapping. Once the user moves a panel, imgui.ini
+    // wins (FirstUseEver).
+    if (strcmp(title, "Polyphorm") == 0) {
+        ImGui::SetNextWindowPos(ImVec2(17, 19), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(474, 657), ImGuiCond_FirstUseEver);
+    } else if (strcmp(title, "SHORTCUTS") == 0) {
+        ImGui::SetNextWindowPos(ImVec2(17, 692), ImGuiCond_FirstUseEver);
+        ImGui::SetNextWindowSize(ImVec2(429, 303), ImGuiCond_FirstUseEver);
+    }
+    ImGui::Begin(title);
     return p;
 }
 
