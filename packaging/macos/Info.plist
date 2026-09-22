@@ -8,6 +8,8 @@
 	<string>Polyphorm</string>
 	<key>CFBundleIdentifier</key>
 	<string>io.github.rulkens.polyphorm</string>
+	<key>CFBundleIconFile</key>
+	<string>Polyphorm</string>
 	<key>CFBundleExecutable</key>
 	<string>Polyphorm</string>
 	<key>CFBundlePackageType</key>

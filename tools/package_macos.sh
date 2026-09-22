@@ -63,7 +63,7 @@ sed "s/@VERSION@/$VERSION/g" packaging/macos/Info.plist > "$APP/Contents/Info.pl
 install -m 755 packaging/macos/launcher.sh "$APP/Contents/MacOS/Polyphorm"
 install -m 755 "$BUILD/polyphorm" "$APP/Contents/MacOS/polyphorm-bin"
 cp shaders/*.wgsl "$APP/Contents/Resources/shaders/"
-cp bin/config.polyp "$APP/Contents/Resources/"
+cp bin/config.polyp packaging/macos/Polyphorm.icns "$APP/Contents/Resources/"
 cp bin/data/palette_*.tga "$APP/Contents/Resources/data/"
 for d in $DATASETS; do
     mkdir -p "$APP/Contents/Resources/$(dirname "$d")"
