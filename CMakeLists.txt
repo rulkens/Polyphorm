@@ -90,6 +90,7 @@ add_executable(polyphorm
   cpplib/graphics.cpp
   cpplib/ui.cpp
   cpplib/resources.cpp
+  cpplib/dataset.cpp
 )
 target_include_directories(polyphorm PRIVATE cpplib)
 target_link_libraries(polyphorm PRIVATE imgui webgpu_dawn webgpu_glfw glfw)
@@ -129,6 +130,15 @@ add_executable(file_system_tests
 target_compile_features(file_system_tests PRIVATE cxx_std_17)
 target_compile_options(file_system_tests PRIVATE -UNDEBUG)
 add_test(NAME file_system_tests COMMAND file_system_tests)
+
+add_executable(dataset_tests
+  tests/dataset_tests.cpp
+  cpplib/dataset.cpp
+)
+target_compile_features(dataset_tests PRIVATE cxx_std_17)
+target_compile_definitions(dataset_tests PRIVATE DATA_ROOT="${CMAKE_SOURCE_DIR}/bin")
+target_compile_options(dataset_tests PRIVATE -UNDEBUG)
+add_test(NAME dataset_tests COMMAND dataset_tests)
 
 add_executable(graphics_tests
   tests/graphics_tests.cpp

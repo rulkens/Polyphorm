@@ -14,6 +14,7 @@ RES="$HERE/../Resources"
 DOMAIN="io.github.rulkens.polyphorm"
 DEFAULT_OUT="$HOME/Polyphorm"
 AGENTS=1000000
+EXTRA=""
 
 # Old macOS versions pass a -psn_* process serial number on Finder launch.
 case "$1" in -psn_*) shift ;; esac
@@ -101,11 +102,27 @@ EOF
         "SDSS — 324"*)  DATASET="data/SDSS/sdssGalaxy_rsdCorr_dbscan_e2p0ms3_dz0p001_m10p0_t=0.0" ;;
         "SDSS — 37"*)   DATASET="data/SDSS/galaxiesInSdssSlice_viz_bigger_lumdist_t=0.0" ;;
         Open*)
-            PICKED=$(osascript -e 'POSIX path of (choose file with prompt "Choose a packed dataset (.bin or _metadata.txt) — see README for packing a CSV")' 2>/dev/null) || continue
+            PICKED=$(osascript -e 'POSIX path of (choose file with prompt "Choose a CSV (x,y,z,weight rows) or a packed .bin / _metadata.txt dataset")' 2>/dev/null) || continue
             case "$PICKED" in
+                *.csv|*.CSV)
+                    DATASET="$PICKED"
+                    # The simulation uses log10(1 + weight) / mean weight, so the
+                    # weight units matter; ask, defaulting to "as is".
+                    SCALE=$(osascript - 2>/dev/null <<'EOF'
+on run argv
+    set t to text returned of (display dialog "Weight scale for this CSV (multiplies the 4th column):" & return & return & "1 = use the weights as they are." & return & "0.001 = 1e9 → 1e12 Msun, as in the published SDSS VAC run (sample_3D_linW.csv)." with title "Polyphorm" default answer "1" buttons {"Cancel", "Load"} default button "Load")
+    return t
+end run
+EOF
+) || continue
+                    case "$SCALE" in
+                        ''|*[!0-9.eE+-]*) dialog "Weight scale must be a number, e.g. 1 or 0.001."; continue ;;
+                    esac
+                    EXTRA="--weight-scale $SCALE"
+                    ;;
                 *_metadata.txt) DATASET="${PICKED%_metadata.txt}" ;;
                 *.bin)          DATASET="${PICKED%.bin}" ;;
-                *) dialog "Please choose a .bin or _metadata.txt file produced by pack_catalog.py."; continue ;;
+                *) dialog "Please choose a .csv, or a .bin / _metadata.txt pair produced by pack_catalog.py."; continue ;;
             esac
             ;;
         *) exit 0 ;;
@@ -114,13 +131,19 @@ EOF
 done
 
 case "$DATASET" in /*) CHECK="$DATASET" ;; *) CHECK="$RES/$DATASET" ;; esac
-if [ ! -f "$CHECK.bin" ] || [ ! -f "${CHECK}_metadata.txt" ]; then
-    dialog "Dataset not found: both $(basename "$CHECK").bin and $(basename "$CHECK")_metadata.txt are needed, in the same folder."
-    exit 1
-fi
+case "$CHECK" in
+    *.csv|*.CSV) [ -f "$CHECK" ] || { dialog "Dataset not found: $CHECK"; exit 1; } ;;
+    *)
+        if [ ! -f "$CHECK.bin" ] || [ ! -f "${CHECK}_metadata.txt" ]; then
+            dialog "Dataset not found: both $(basename "$CHECK").bin and $(basename "$CHECK")_metadata.txt are needed, in the same folder."
+            exit 1
+        fi ;;
+esac
 
-echo "dataset: $DATASET"
-POLYPHORM_OUTPUT_DIR="$OUT" "$BIN" --dataset "$DATASET" --agents "$AGENTS"
+echo "dataset: $DATASET $EXTRA"
+# $EXTRA is unquoted on purpose: empty, or "--weight-scale <number>".
+# shellcheck disable=SC2086
+POLYPHORM_OUTPUT_DIR="$OUT" "$BIN" --dataset "$DATASET" --agents "$AGENTS" $EXTRA
 STATUS=$?
 if [ $STATUS -ne 0 ]; then
     dialog "Polyphorm exited with an error (code $STATUS). Details are in $OUT/polyphorm.log"

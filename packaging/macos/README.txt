@@ -68,17 +68,28 @@ an OpenVDB file for Blender.
 
 Your own data
 -------------
-Polyphorm reads a packed pair: <name>.bin (float32 x,y,z,weight rows) and
-<name>_metadata.txt. pack_catalog.py (included next to this README) makes
-one from a CSV with four columns x,y,z,weight and no header row:
+Choose "Open my own dataset" and pick either:
+
+  - a CSV with one galaxy per row: x,y,z,weight (commas, semicolons, tabs
+    or spaces; a header row and '#' comment lines are skipped; extra
+    columns are ignored), or
+  - a packed pair <name>.bin + <name>_metadata.txt (pick either file).
+
+For a CSV, Polyphorm asks for a weight scale that multiplies the weight
+column. It matters: the simulation uses log10(1 + weight) divided by the
+mean weight. Use 1 to take the weights as they are. For the SDSS VAC
+input catalog (sample_3D_linW.csv, weights in 1e9 Msun) use 0.001 to
+reproduce the published run, which used 1e12 Msun.
+
+Packing a large CSV once makes it load faster. pack_catalog.py (next to
+this README) does that:
 
   python3 -m pip install numpy
   python3 pack_catalog.py --csv mygalaxies.csv --out mygalaxies
 
-Then choose "Open my own dataset" and pick mygalaxies.bin. If the file is
-in Documents, Desktop or Downloads, macOS asks whether Polyphorm may
-access that folder; allow it. Keeping datasets in ~/Polyphorm avoids the
-question entirely.
+If the file is in Documents, Desktop or Downloads, macOS asks whether
+Polyphorm may access that folder; allow it. Keeping datasets in
+~/Polyphorm avoids the question entirely.
 
 Command line
 ------------
@@ -86,8 +97,10 @@ The app can also be run from Terminal, with the same flags as the source
 build:
 
   /Applications/Polyphorm.app/Contents/MacOS/Polyphorm --dataset mygalaxies --agents 2000000
+  /Applications/Polyphorm.app/Contents/MacOS/Polyphorm --dataset sample_3D_linW.csv --weight-scale 0.001
   /Applications/Polyphorm.app/Contents/MacOS/Polyphorm --headless 1000 --export --dataset mygalaxies
 
---headless N runs N iterations without a window; --export writes an
+--dataset takes a CSV or a packed pair; --weight-scale S multiplies CSV
+weights. --headless N runs N iterations without a window; --export writes an
 export at the end, into the output folder chosen in the app (or
 ~/Polyphorm). Set POLYPHORM_OUTPUT_DIR=/some/folder to override it.

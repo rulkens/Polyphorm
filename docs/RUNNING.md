@@ -49,7 +49,7 @@ at about 1.4 GB. Everything after that is incremental, so avoid wiping
 cd build && ctest --output-on-failure
 ```
 
-Seven suites (cpplib, file_system, graphics, shader_compile,
+Eight suites (cpplib, file_system, dataset, graphics, shader_compile,
 render_path, sim_kernel, energy_smoke). All must be green before any
 commit. `energy_smoke` runs a real 400-iteration headless simulation on
 a synthetic dataset and is slower on its first run after a build
@@ -97,11 +97,29 @@ Three catalogs are in use on this branch:
   cartesian Mpc), tracked in the repo as both the source CSV and the
   packed pair; see `bin/data/2MRS/README.md`. It is an interactive
   extra, not part of the validation. Any x,y,z,weight CSV in this
-  layout can be packed with the generic packer:
+  layout can also be loaded directly (below), or packed with the generic
+  packer:
 
   ```sh
   .venv/bin/python tools/pack_catalog.py --csv bin/data/2MRS/2mrs_gui.csv --out bin/data/2MRS/2mrs_gui
   ```
+
+`--dataset` also accepts a CSV directly (`cpplib/dataset.cpp`): one
+x,y,z,weight row per line, comma/semicolon/tab/space separated, header
+and `#` lines skipped, extra columns ignored. The metadata is computed on
+load the way `pack_catalog.py` writes it, so a CSV and its packed pair
+load bit-identically (`dataset_tests` checks both 2MRS and the VAC
+catalog). `--weight-scale S` multiplies the CSV weights first; the
+weights matter, since particles get `log10(1 + w) / mean_w`. The VAC
+input needs `0.001` (1e9 to 1e12 Msun, as `pack_vac_catalog.py` does):
+
+```sh
+cd bin
+../build/polyphorm --dataset data/reference/sample_3D_linW.csv --weight-scale 0.001 --agents 1000000
+```
+
+A packed pair may also be named by either of its files (`x.bin`,
+`x_metadata.txt`) instead of the bare base.
 
 `bin/data/reference/` holds the validation inputs that did not originate
 here, byte-identical to their public sources: the VAC input catalog,
@@ -133,7 +151,8 @@ cd bin
 ```
 
 `--dataset` is required for windowed runs, since the compile-time
-default file is not shipped. `--agents N` sets the starting active
+default file is not shipped. It takes a packed pair or a CSV (see
+Datasets). `--agents N` sets the starting active
 agent count, clamped to the `config.polyp` maximum; the AGENT COUNT
 dropdown can still change it later.
 

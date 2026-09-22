@@ -1,4 +1,5 @@
 #include "resources.h"
+#include "dataset.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -57,8 +58,7 @@ void resources::init(const char **dataset_path)
     // Resources instead.
     if (dataset_path && *dataset_path) {
         fs::path p(*dataset_path);
-        fs::path meta = p; meta += "_metadata.txt";
-        if (p.is_relative() && fs::exists(meta, ec)) {
+        if (p.is_relative() && dataset::exists(p.string())) {
             g_dataset_storage = fs::absolute(p, ec).string();
             *dataset_path = g_dataset_storage.c_str();
         }

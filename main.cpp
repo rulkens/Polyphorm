@@ -9,6 +9,7 @@
 #include <cassert>
 #include "logging.h"
 #include "resources.h"
+#include "dataset.h"
 #include <cstddef>
 #include <cstring>
 #include <cstdlib>
@@ -374,11 +375,15 @@ int main(int argc, char **argv)
     // --agents N starts with N active agents (clamped to the config.polyp
     // maximum); the AGENT COUNT combo picks this up and can change it later.
     int32_t agents_override = 0;
+    // --weight-scale S multiplies CSV weights on load (tools/pack_catalog.py's
+    // --weight-scale; ignored for packed .bin pairs, scaled when packed).
+    double weight_scale = 1.0;
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--headless") == 0 && i + 1 < argc) headless_frames = atoi(argv[i + 1]);
         if (strcmp(argv[i], "--dataset") == 0 && i + 1 < argc) dataset_override = argv[i + 1];
         if (strcmp(argv[i], "--export") == 0) export_on_exit = true;
         if (strcmp(argv[i], "--agents") == 0 && i + 1 < argc) agents_override = atoi(argv[i + 1]);
+        if (strcmp(argv[i], "--weight-scale") == 0 && i + 1 < argc) weight_scale = atof(argv[i + 1]);
     }
     const bool headless = headless_frames > 0;
     // Release: inside Polyphorm.app, read from Contents/Resources and write
@@ -414,30 +419,27 @@ int main(int argc, char **argv)
     }
 
     // Data setup
-        // Load dataset description from metafile
+        // Load the catalog: the upstream .bin + _metadata.txt pair (metadata
+        // used as written), or — port addition — an x,y,z,weight CSV with
+        // the metadata computed on load (cpplib/dataset.h).
+    #ifdef HALO_COLOR_ANALYSIS
+    #error "HALO_COLOR_ANALYSIS needs 5-float rows; cpplib/dataset.cpp loads x,y,z,weight only"
+    #endif
     std::string filename(dataset_override ? dataset_override : DATASET_NAME);
-    std::ifstream metadata_file;
-    metadata_file.open((filename + "_metadata.txt").c_str(), std::ofstream::in);
-    if (!metadata_file.good()) {
-        printf("Data or metadata file missing!\n\n");
+    Dataset input_dataset;
+    std::string dataset_error;
+    if (!dataset::load(filename, weight_scale, &input_dataset, &dataset_error)) {
+        printf("Data or metadata file missing!\n%s\n\n", dataset_error.c_str());
         return 0;
     }
-    float data_x_min, data_x_max, data_y_min, data_y_max, data_z_min, data_z_max;
-    float mean_weight;
-    int data_count;
-    std::getline(metadata_file, varname, '='); metadata_file >> data_count;
-    std::getline(metadata_file, varname, '='); metadata_file >> data_x_min;
-    std::getline(metadata_file, varname, '='); metadata_file >> data_x_max;
-    std::getline(metadata_file, varname, '='); metadata_file >> data_y_min;
-    std::getline(metadata_file, varname, '='); metadata_file >> data_y_max;
-    std::getline(metadata_file, varname, '='); metadata_file >> data_z_min;
-    std::getline(metadata_file, varname, '='); metadata_file >> data_z_max;
-    std::getline(metadata_file, varname, '='); metadata_file >> mean_weight;
-    metadata_file.close();
-
-        // Load binary data points
-    File raw_data = file_system::read_file((filename + ".bin").c_str());
-    float *input_data = (float*)raw_data.data;
+    if (dataset::is_csv(filename))
+        printf("-> csv dataset, weight scale %g\n", weight_scale);
+    float data_x_min = input_dataset.min[0], data_x_max = input_dataset.max[0];
+    float data_y_min = input_dataset.min[1], data_y_max = input_dataset.max[1];
+    float data_z_min = input_dataset.min[2], data_z_max = input_dataset.max[2];
+    float mean_weight = input_dataset.mean_weight;
+    int data_count = input_dataset.count;
+    float *input_data = input_dataset.xyzw.data();
     printf("\n-> input data points: %d\n", data_count);
     printf("-> number of agents: %d\n", NUM_AGENTS);
     int32_t NUM_PARTICLES = NUM_AGENTS + data_count;
