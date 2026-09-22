@@ -230,6 +230,11 @@ bool add_play_pause_button(Panel *, bool running, const char *label) {
     return clicked;
 }
 
+void add_spacing(Panel *, float pixels) {
+    ensure_frame_open();
+    ImGui::Dummy(ImVec2(0.0f, pixels));
+}
+
 void release() {
     graphics::set_frame_end_hook(nullptr);   // defensive: no dangling callback into torn-down ImGui state
     ImGui_ImplWGPU_Shutdown();

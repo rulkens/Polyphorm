@@ -1703,6 +1703,7 @@ int main(int argc, char **argv)
                 if (run_mold) snprintf(pause_label, sizeof(pause_label), "PAUSE  (F3)");
                 else          snprintf(pause_label, sizeof(pause_label), "RESUME  (paused at pass %d)", simulation_config.n_iteration);
                 if (ui::add_play_pause_button(&panel, run_mold, pause_label)) run_mold = !run_mold;
+                ui::add_spacing(&panel, 8.0f);
             }
 
             float ss = math::rad2deg(simulation_config.sense_spread);
