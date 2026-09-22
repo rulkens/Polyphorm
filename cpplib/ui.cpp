@@ -203,22 +203,22 @@ bool add_combo(Panel *, char *label, int *index, const char *const items[], int 
 
 bool add_play_pause_button(Panel *, bool running, const char *label) {
     ensure_frame_open();
-    // The default ImGui font has no media glyphs, so the icon is drawn:
-    // a normal full-width button with left padding reserved for it.
+    // The default ImGui font has no media glyphs, so the icon is drawn. The
+    // button hugs its content: padding | icon | gap | label | padding, with
+    // the label right-aligned so the icon owns the left side.
     const float h = ImGui::GetFrameHeight();
     const float icon = h * 0.45f;
-    ImGuiStyle &style = ImGui::GetStyle();
-    ImVec2 pad_saved = style.FramePadding;
-    style.FramePadding.x += icon + pad_saved.x;
-    ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(0.0f, 0.5f));
-    bool clicked = ImGui::Button(label, ImVec2(-FLT_MIN, 0.0f));
+    const ImVec2 pad = ImGui::GetStyle().FramePadding;
+    const float gap = pad.x;
+    const float width = pad.x + icon + gap + ImGui::CalcTextSize(label, nullptr, true).x + pad.x;
+    ImGui::PushStyleVar(ImGuiStyleVar_ButtonTextAlign, ImVec2(1.0f, 0.5f));
+    bool clicked = ImGui::Button(label, ImVec2(width, 0.0f));
     ImGui::PopStyleVar();
-    style.FramePadding = pad_saved;
 
     ImDrawList *dl = ImGui::GetWindowDrawList();
     ImU32 col = ImGui::GetColorU32(ImGuiCol_Text);
     ImVec2 r = ImGui::GetItemRectMin();
-    float x = r.x + pad_saved.x + 1.0f;
+    float x = r.x + pad.x;
     float y = r.y + (h - icon) * 0.5f;
     if (running) {   // pause: two bars
         float bar = icon * 0.34f;
