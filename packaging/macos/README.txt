@@ -31,7 +31,11 @@ After that it opens normally.
 
 Using it
 --------
-Double-click Polyphorm.app and pick a dataset:
+On the first launch Polyphorm asks where to save its exports and log.
+"Use Default" puts them in ~/Polyphorm. To change it later, choose
+"Change output folder…" in the dataset list.
+
+Each launch then asks which dataset to load:
 
   - 2MRS: 34,974 galaxies, all-sky
   - SDSS full: 324,901 galaxies (the catalog behind the published
@@ -46,7 +50,10 @@ F8 clears the trace; left-drag orbits, right-drag pans, scroll zooms.
 
 Output
 ------
-Everything the app writes goes to ~/Polyphorm:
+Everything the app writes goes to the output folder (default ~/Polyphorm).
+A folder inside Documents, Desktop or Downloads works, but macOS asks for
+permission and may ask again after each update of the app; if it can no
+longer write there, Polyphorm asks you to pick another folder.
 
   - export/YYYY-MM-DD_HH-MM-SS/  (F6) trace.bin + deposit.bin (headerless
     float16 volumes, index = z*W*H + y*W + x), export_metadata.txt with
@@ -79,4 +86,5 @@ build:
   /Applications/Polyphorm.app/Contents/MacOS/Polyphorm --headless 1000 --export --dataset mygalaxies
 
 --headless N runs N iterations without a window; --export writes an
-export at the end (to ~/Polyphorm/export).
+export at the end, into the output folder chosen in the app (or
+~/Polyphorm). Set POLYPHORM_OUTPUT_DIR=/some/folder to override it.

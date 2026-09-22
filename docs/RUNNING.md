@@ -259,7 +259,12 @@ the upstream repo.
 
 Inside the bundle, `cpplib/resources.cpp` switches the binary to
 bundle mode: it reads from `Contents/Resources` and writes exports,
-`imgui.ini` and the launcher log to `~/Polyphorm`. Outside a
+`imgui.ini` and the launcher log to `$POLYPHORM_OUTPUT_DIR`, falling
+back to `~/Polyphorm`. The launcher asks for that folder on the first
+Finder launch (default `~/Polyphorm`), remembers it with `defaults`
+under `io.github.rulkens.polyphorm OutputDir`, and offers "Change
+output folder…" in the dataset list; `defaults delete
+io.github.rulkens.polyphorm OutputDir` makes it ask again. Outside a
 bundle nothing changes. `packaging/macos/` holds the `Info.plist`, the
 launcher script (a dataset picker on double-click, argument passthrough
 from a terminal) and the README that ships in the zip, which explains

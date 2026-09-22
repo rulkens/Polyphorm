@@ -41,12 +41,16 @@ void resources::init(const char **dataset_path)
     g_bundle = true;
     g_shader_root = (res / "shaders").string();
     g_data_root = res.string();
+    // The launcher passes the user's chosen folder (first-launch prompt,
+    // stored in the app's defaults). Fallback ~/Polyphorm, not
+    // ~/Documents/Polyphorm: Documents is TCC-protected, and an ad-hoc
+    // signed app gets a new code identity on every rebuild, so a granted
+    // Documents permission silently stops applying and writes fail (EPERM).
+    const char *chosen = getenv("POLYPHORM_OUTPUT_DIR");
     const char *home = getenv("HOME");
-    // ~/Polyphorm, not ~/Documents/Polyphorm: Documents is TCC-protected,
-    // and an ad-hoc signed app gets a new code identity on every rebuild,
-    // so a granted Documents permission silently stops applying and every
-    // write fails with EPERM.
-    g_output_root = (fs::path(home ? home : "/tmp") / "Polyphorm").string();
+    g_output_root = (chosen && *chosen)
+        ? std::string(chosen)
+        : (fs::path(home ? home : "/tmp") / "Polyphorm").string();
 
     // A --dataset given relative to where the user launched from must
     // survive the chdir below; bundled "data/..." paths resolve against
