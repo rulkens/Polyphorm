@@ -62,11 +62,12 @@ EOF
 writable() { { mkdir -p "$1" && : >>"$1/polyphorm.log"; } 2>/dev/null; }
 
 [ -n "$OUT" ] || OUT="$(ask_output)"
-# A folder inside Documents/Desktop/Downloads can lose its privacy grant
-# (the ad-hoc signed app changes identity with every release): ask again
-# rather than quitting silently.
+# A folder inside Documents/Desktop/Downloads needs a privacy grant, which
+# macOS asks for again after each release (new ad-hoc signature). If it
+# was denied, ask for the folder again rather than quitting silently;
+# picking it in the folder chooser grants access.
 if ! writable "$OUT"; then
-    dialog "Polyphorm cannot write to $OUT. Please choose another output folder (the default ~/Polyphorm always works)."
+    dialog "Polyphorm cannot write to $OUT. If macOS asked for access and it was not allowed, choose the same folder again to grant it, or pick another (the default ~/Polyphorm always works)."
     OUT="$(ask_output)"
     writable "$OUT" || { dialog "Polyphorm cannot write to $OUT either. Giving up."; exit 1; }
 fi

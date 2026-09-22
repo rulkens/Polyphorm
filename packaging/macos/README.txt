@@ -54,9 +54,10 @@ F8 clears the trace; left-drag orbits, right-drag pans, scroll zooms.
 Output
 ------
 Everything the app writes goes to the output folder (default ~/Polyphorm).
-A folder inside Documents, Desktop or Downloads works, but macOS asks for
-permission and may ask again after each update of the app; if it can no
-longer write there, Polyphorm asks you to pick another folder.
+A folder inside Documents, Desktop or Downloads works: macOS asks whether
+Polyphorm may access it (click Allow), and asks once more after each
+update of the app. If access was refused, Polyphorm asks for the folder
+again; choosing the same one grants access.
 
   - export/YYYY-MM-DD_HH-MM-SS/  (F6) trace.bin + deposit.bin (headerless
     float16 volumes, index = z*W*H + y*W + x), export_metadata.txt with
