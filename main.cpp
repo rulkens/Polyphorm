@@ -1793,10 +1793,10 @@ int main(int argc, char **argv)
                 rendering_config.trim_z_max = smoothing_coef * rendering_config.trim_z_max + (1.0-smoothing_coef) * (trim_pos + 0.5 * trim_width);
             }
 
-            bool is_toggled;
-            is_toggled = vis_mode == VisualizationMode::VM_VOLUME;
-            ui::add_toggle(&panel, "VIS: TRACE", &is_toggled);
-            vis_mode = is_toggled? VisualizationMode::VM_VOLUME : vis_mode;
+            // Port QoL: the VIS modes are mutually exclusive (upstream drew them
+            // as checkboxes, so unchecking the active one looked broken but
+            // did nothing); radio buttons, same behavior.
+            if (ui::add_radio(&panel, "VIS: TRACE", vis_mode == VisualizationMode::VM_VOLUME)) vis_mode = VisualizationMode::VM_VOLUME;
             if (vis_mode == VisualizationMode::VM_VOLUME) {
                 ui::add_slider(&panel, "OPTI THICKNESS", &rendering_config.optical_thickness, 0.0, 1.0);
                 float trd = log(rendering_config.trim_density) / log(HISTOGRAM_BASE);
@@ -1805,9 +1805,7 @@ int main(int argc, char **argv)
                 ui::add_slider(&panel, "BACKGROUND COL", &background_color, 0.0, 1.0);
             }
 
-            is_toggled = vis_mode == VisualizationMode::VM_VOLUME_HIGHLIGHT;
-            ui::add_toggle(&panel, "VIS: HIGHLIGHTS", &is_toggled);
-            vis_mode = is_toggled? VisualizationMode::VM_VOLUME_HIGHLIGHT : vis_mode;
+            if (ui::add_radio(&panel, "VIS: HIGHLIGHTS", vis_mode == VisualizationMode::VM_VOLUME_HIGHLIGHT)) vis_mode = VisualizationMode::VM_VOLUME_HIGHLIGHT;
             if (vis_mode == VisualizationMode::VM_VOLUME_HIGHLIGHT) {
                 ui::add_slider(&panel, "OPTI THICKNESS", &rendering_config.optical_thickness, 0.0, 1.0);
                 float hgd = log(rendering_config.highlight_density) / log(HISTOGRAM_BASE);
@@ -1819,9 +1817,7 @@ int main(int argc, char **argv)
                 ui::add_slider(&panel, "BACKGROUND COL", &background_color, 0.0, 1.0);
             }
 
-            is_toggled = vis_mode == VisualizationMode::VM_VOLUME_OVERDENSITY;
-            ui::add_toggle(&panel, "VIS: OVERDENSITY", &is_toggled);
-            vis_mode = is_toggled? VisualizationMode::VM_VOLUME_OVERDENSITY : vis_mode;
+            if (ui::add_radio(&panel, "VIS: OVERDENSITY", vis_mode == VisualizationMode::VM_VOLUME_OVERDENSITY)) vis_mode = VisualizationMode::VM_VOLUME_OVERDENSITY;
             if (vis_mode == VisualizationMode::VM_VOLUME_OVERDENSITY) {
                 ui::add_slider(&panel, "OPTI THICKNESS", &rendering_config.optical_thickness, 0.0, 1.0);
                 float trd = log(rendering_config.trim_density) / log(HISTOGRAM_BASE);
@@ -1836,9 +1832,7 @@ int main(int argc, char **argv)
             }
 
             #ifdef HALO_COLOR_ANALYSIS
-            is_toggled = vis_mode == VisualizationMode::VM_VOLUME_HALOCOLOR;
-            ui::add_toggle(&panel, "VIS: HALO COLOR", &is_toggled);
-            vis_mode = is_toggled? VisualizationMode::VM_VOLUME_HALOCOLOR : vis_mode;
+            if (ui::add_radio(&panel, "VIS: HALO COLOR", vis_mode == VisualizationMode::VM_VOLUME_HALOCOLOR)) vis_mode = VisualizationMode::VM_VOLUME_HALOCOLOR;
             if (vis_mode == VisualizationMode::VM_VOLUME_HALOCOLOR) {
                 ui::add_slider(&panel, "OPTI THICKNESS", &rendering_config.optical_thickness, 0.0, 1.0);
                 float trd = log(rendering_config.trim_density) / log(HISTOGRAM_BASE);
@@ -1849,9 +1843,7 @@ int main(int argc, char **argv)
             #endif
 
             #ifdef VELOCITY_ANALYSIS
-            is_toggled = vis_mode == VisualizationMode::VM_VOLUME_VELOCITY;
-            ui::add_toggle(&panel, "VIS: VELOCITY", &is_toggled);
-            vis_mode = is_toggled? VisualizationMode::VM_VOLUME_VELOCITY : vis_mode;
+            if (ui::add_radio(&panel, "VIS: VELOCITY", vis_mode == VisualizationMode::VM_VOLUME_VELOCITY)) vis_mode = VisualizationMode::VM_VOLUME_VELOCITY;
             if (vis_mode == VisualizationMode::VM_VOLUME_VELOCITY) {
                 ui::add_slider(&panel, "OPTI THICKNESS", &rendering_config.optical_thickness, 0.0, 1.0);
                 float trd = log(rendering_config.trim_density) / log(HISTOGRAM_BASE);
@@ -1861,13 +1853,9 @@ int main(int argc, char **argv)
             }
             #endif
 
-            is_toggled = vis_mode == VisualizationMode::VM_PARTICLES;
-            ui::add_toggle(&panel, "VIS: PARTICLES", &is_toggled);
-            vis_mode = is_toggled? VisualizationMode::VM_PARTICLES : vis_mode;
+            if (ui::add_radio(&panel, "VIS: PARTICLES", vis_mode == VisualizationMode::VM_PARTICLES)) vis_mode = VisualizationMode::VM_PARTICLES;
 
-            is_toggled = vis_mode == VisualizationMode::VM_PATH_TRACING;
-            ui::add_toggle(&panel, "VIS: PATH TRACING", &is_toggled);
-            vis_mode = is_toggled? VisualizationMode::VM_PATH_TRACING : vis_mode;
+            if (ui::add_radio(&panel, "VIS: PATH TRACING", vis_mode == VisualizationMode::VM_PATH_TRACING)) vis_mode = VisualizationMode::VM_PATH_TRACING;
             if (vis_mode == VisualizationMode::VM_PATH_TRACING) {
                 float sigma_t = rendering_config.sigma_a + rendering_config.sigma_s;
                 float albedo = sigma_t < 1.e-5 ? 0.0 : rendering_config.sigma_s / sigma_t;

@@ -230,6 +230,11 @@ bool add_play_pause_button(Panel *, bool running, const char *label) {
     return clicked;
 }
 
+bool add_radio(Panel *, const char *label, bool active) {
+    ensure_frame_open();
+    return ImGui::RadioButton(label, active);
+}
+
 void add_spacing(Panel *, float pixels) {
     ensure_frame_open();
     ImGui::Dummy(ImVec2(0.0f, pixels));

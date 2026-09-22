@@ -42,6 +42,8 @@ namespace ui
     // Port addition: content-sized button with a drawn pause (running) or
     // play (paused) icon before the label; returns true when clicked.
     bool add_play_pause_button(Panel *panel, bool running, const char *label);
+    // Port addition: radio button; returns true when clicked.
+    bool add_radio(Panel *panel, const char *label, bool active);
     // Port addition: vertical gap of `pixels` before the next row.
     void add_spacing(Panel *panel, float pixels);
 
