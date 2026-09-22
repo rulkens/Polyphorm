@@ -46,8 +46,8 @@ Each launch then asks which dataset to load:
 The PAUSE button at the top of the panel (or F3) pauses the simulation;
 the view and UI stay fully responsive while paused, which makes camera
 work and tweaking much smoother. The simulation starts with 1M agents;
-the AGENT COUNT dropdown goes up to
-10M (slower, higher quality). Controls are listed in the SHORTCUTS panel.
+the AGENT COUNT dropdown goes up to 10M (slower, higher quality).
+Controls are listed in the SHORTCUTS panel.
 The important ones: F1 toggles the UI, F2 resets, F3 pauses, F6 exports,
 F8 clears the trace; left-drag orbits, right-drag pans, scroll zooms.
 
