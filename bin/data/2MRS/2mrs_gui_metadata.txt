@@ -5,4 +5,4 @@ Min Y = -370.4463
 Max Y = 412.57773
 Min Z = -483.16614
 Max Z = 556.9248
-Mean weight = 85.59782
+Mean weight = 0.08559781

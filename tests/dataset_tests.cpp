@@ -38,9 +38,11 @@ int main()
 {
     const std::string data = DATA_ROOT "/data/";
 
-    // Real catalogs: 2MRS packed at weight scale 1; the SDSS VAC catalog
-    // packed by tools/pack_vac_catalog.py with weights / 1000 (1e9 -> 1e12
-    // Msun). The SDSS pair is gitignored; skip it when absent.
+    // Real catalogs, all in 1e12 Msun once loaded. The 2MRS CSV is already
+    // in 1e12 Msun, so it is packed at weight scale 1. The SDSS source CSV
+    // (sample_3D_linW.csv) is in 1e9 Msun and is packed at 0.001 by
+    // tools/pack_vac_catalog.py. The SDSS pair is gitignored; skip it when
+    // absent.
     check_csv_matches_packed(data + "2MRS/2mrs_gui.csv", data + "2MRS/2mrs_gui", 1.0f);
     const std::string sdss = data + "SDSS/sdssGalaxy_rsdCorr_dbscan_e2p0ms3_dz0p001_m10p0_t=0.0";
     if (dataset::exists(sdss))

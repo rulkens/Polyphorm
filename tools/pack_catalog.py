@@ -4,15 +4,20 @@
 Generic sibling of pack_vac_catalog.py — that script is deliberately
 hard-wired to the SDSS VAC (point-count and unit hard-fails, grid
 provenance checks); this one packs any catalog in the same CSV layout,
-e.g. PolyPhy's 2MRS export:
+e.g. the 2MRS catalog:
 
     .venv/bin/python tools/pack_catalog.py \
-        --csv path/to/2mrs_gui.csv \
+        --csv bin/data/2MRS/2mrs_gui.csv \
         --out bin/data/2MRS/2mrs_gui
 
 Then run with `--dataset data/2MRS/2mrs_gui` (from bin/). Output format
 matches the upstream packer: float32 (N,4) rows straight to .bin, plus
 the positional-key metadata file main.cpp parses.
+
+Weights: Polyphorm deposits log10(1 + weight) per galaxy, so the unit
+changes the result. The bundled datasets are stellar mass in 1e12 Msun;
+use --weight-scale to bring a CSV in another unit to that (0.001 for
+1e9 Msun, e.g. the published sample_3D_linW.csv).
 """
 
 import argparse
@@ -30,9 +35,9 @@ def main():
                     help="output base path, no extension "
                          "(writes <out>.bin + <out>_metadata.txt)")
     ap.add_argument("--weight-scale", type=float, default=1.0,
-                    help="multiply weights by this (default 1.0 — Polyphorm "
-                         "normalizes by the metadata mean weight, so absolute "
-                         "units mostly shift trace magnitudes)")
+                    help="multiply weights by this (default 1.0). The unit "
+                         "matters: Polyphorm uses log10(1 + weight); bundled "
+                         "datasets are in 1e12 Msun (0.001 converts 1e9 Msun)")
     args = ap.parse_args()
 
     data = np.loadtxt(args.csv, delimiter=",")
