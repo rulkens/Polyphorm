@@ -41,13 +41,15 @@ int main()
     // Real catalogs, all in 1e12 Msun once loaded. The 2MRS CSV is already
     // in 1e12 Msun, so it is packed at weight scale 1. The SDSS source CSV
     // (sample_3D_linW.csv) is in 1e9 Msun and is packed at 0.001 by
-    // tools/pack_vac_catalog.py. The SDSS pair is gitignored; skip it when
+    // tools/pack_vac_catalog.py; sdss_vac_1e12Msun.csv is the same rows
+    // already divided by 1000. The SDSS pair is gitignored; skip it when
     // absent.
     check_csv_matches_packed(data + "2MRS/2mrs_gui.csv", data + "2MRS/2mrs_gui", 1.0f);
     const std::string sdss = data + "SDSS/sdssGalaxy_rsdCorr_dbscan_e2p0ms3_dz0p001_m10p0_t=0.0";
-    if (dataset::exists(sdss))
+    if (dataset::exists(sdss)) {
         check_csv_matches_packed(data + "reference/sample_3D_linW.csv", sdss, 0.001);
-    else
+        check_csv_matches_packed(data + "SDSS/sdss_vac_1e12Msun.csv", sdss, 1.0f);
+    } else
         printf("  (skipped SDSS: %s.bin not packed)\n", sdss.c_str());
 
     // Either file of a packed pair names the pair.

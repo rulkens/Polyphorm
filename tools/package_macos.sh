@@ -4,7 +4,8 @@
 #   tools/package_macos.sh v1.2.0-alpha
 #
 # Output: dist/Polyphorm-<version>-macos-arm64.zip (v1.2.0-alpha ->
-# 1.2.0-alpha) containing Polyphorm.app, README.txt and pack_catalog.py.
+# 1.2.0-alpha) containing Polyphorm.app, README.txt, pack_catalog.py and
+# sdss_vac_1e12Msun.csv (the example CSV).
 # Info.plist gets the numeric part only (1.2.0), as macOS expects. Uses a separate build-release/ tree
 # (deployment target 13.0) that reuses build/'s Dawn and ImGui checkouts,
 # so the dev build/ is untouched. The app is ad-hoc signed only; see
@@ -75,7 +76,7 @@ done
 sed "s/@VERSION@/$VERSION/g; s/@TAG@/$TAG/g" packaging/macos/README.txt \
     | awk 'NR == 1 { t = length($0) } NR == 2 { s = ""; for (i = 0; i < t; i++) s = s "="; print s; next } { print }' \
     > "$STAGE/README.txt"
-cp tools/pack_catalog.py "$STAGE/"
+cp tools/pack_catalog.py bin/data/SDSS/sdss_vac_1e12Msun.csv "$STAGE/"
 
 echo "==> ad-hoc sign"
 codesign --force --sign - "$APP/Contents/MacOS/polyphorm-bin"

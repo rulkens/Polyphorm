@@ -95,8 +95,9 @@ Three catalogs are in use on this branch:
   The script hard-fails on point count and unit mismatches.
 - `data/2MRS/2mrs_gui`, the 2MRS catalog (34,974 galaxies, equatorial
   cartesian Mpc), tracked in the repo as both the source CSV and the
-  packed pair; see `bin/data/2MRS/README.md`. It is an interactive
-  extra, not part of the validation. Any x,y,z,weight CSV in this
+  packed pair, both in 10^12 Msun; see `bin/data/2MRS/README.md`. It
+  is an interactive extra, not part of the validation. Repacking takes
+  no `--weight-scale`. Any x,y,z,weight CSV in this
   layout can also be loaded directly (below), or packed with the generic
   packer:
 
@@ -110,13 +111,25 @@ and `#` lines skipped, extra columns ignored. The metadata is computed on
 load the way `pack_catalog.py` writes it, so a CSV and its packed pair
 load bit-identically (`dataset_tests` checks both 2MRS and the VAC
 catalog). `--weight-scale S` multiplies the CSV weights first; the
-weights matter, since particles get `log10(1 + w) / mean_w`. The VAC
-input needs `0.001` (1e9 to 1e12 Msun, as `pack_vac_catalog.py` does):
+weights matter, since particles get `log10(1 + w) / mean_w`, so the
+unit of `w` changes the result. Every bundled dataset is in stellar mass
+in 10^12 Msun; give a CSV in another unit the matching weight scale.
+The published VAC input is in 10^9 Msun and needs `0.001` (as
+`pack_vac_catalog.py` does); `sdss_vac_1e12Msun.csv` is the same rows
+already divided by 1000:
 
 ```sh
 cd bin
 ../build/polyphorm --dataset data/reference/sample_3D_linW.csv --weight-scale 0.001 --agents 1000000
+../build/polyphorm --dataset data/SDSS/sdss_vac_1e12Msun.csv --agents 1000000
 ```
+
+| File | Unit | Weight scale to load it | What it is |
+|---|---|---|---|
+| `bin/data/reference/sample_3D_linW.csv` | 10^9 Msun | 0.001 | The published catalog file, unchanged |
+| `bin/data/SDSS/sdss_vac_1e12Msun.csv` | 10^12 Msun | 1 | The same rows, weights / 1000 |
+| `bin/data/SDSS/sdssGalaxy_rsdCorr_..._t=0.0` `.bin` | 10^12 Msun | (packed) | What the app loads as "SDSS full" |
+| `bin/data/2MRS/2mrs_gui.csv` and `.bin` | 10^12 Msun | 1 | 2MRS, converted in v1.2.1-alpha |
 
 A packed pair may also be named by either of its files (`x.bin`,
 `x_metadata.txt`) instead of the bare base.
@@ -277,7 +290,8 @@ gh release create v1.2.0-alpha -R rulkens/Polyphorm --prerelease \
 It builds in a separate `build-release/` tree (deployment target 13.0,
 reusing `build/`'s Dawn and ImGui sources), bundles the WGSL shaders,
 `config.polyp`, the palettes and the 2MRS and SDSS datasets into
-`Contents/Resources`, and ad-hoc signs the result. Pass `-R
+`Contents/Resources`, puts `pack_catalog.py` and `sdss_vac_1e12Msun.csv`
+(the example CSV) beside the app, and ad-hoc signs the result. Pass `-R
 rulkens/Polyphorm` to `gh`: in this checkout it otherwise defaults to
 the upstream repo.
 

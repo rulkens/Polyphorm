@@ -20,6 +20,25 @@ Not committed, but placed here by the tools:
 | `mcpm_sdss_d4.npy`, `mcpm_sdss_d2.npy` | 37 MB, 296 MB | `extract_reference.py --factors 8 4 2` (not needed for validation) |
 | `mcpm_v1_0_0_datacube_SDSS_z_44-476mpc.sha1sum` | | the archive's own checksum file, fetched by the download script |
 
+## Which catalog file is which
+
+Polyphorm deposits `log10(1 + weight)` per galaxy, so the weight unit
+changes the result. Every dataset this port runs is in stellar mass in
+10^12 Msun; `sample_3D_linW.csv` is the one file that is not, and needs
+a weight scale of 0.001 when loaded directly.
+
+| File | Unit | Weight scale to load it | What it is |
+|---|---|---|---|
+| `bin/data/reference/sample_3D_linW.csv` | 10^9 Msun | 0.001 | The published catalog file, unchanged |
+| `bin/data/SDSS/sdss_vac_1e12Msun.csv` | 10^12 Msun | 1 | The same rows, weights / 1000 |
+| `bin/data/SDSS/sdssGalaxy_rsdCorr_..._t=0.0` `.bin` | 10^12 Msun | (packed) | What the app loads as "SDSS full" |
+| `bin/data/2MRS/2mrs_gui.csv` and `.bin` | 10^12 Msun | 1 | 2MRS, converted in v1.2.1-alpha |
+
+`sample_3D_linW.csv` stays as published, because its checksum is what
+ties this port to the published run. To load the catalog without a
+weight scale, use the rescaled copy `bin/data/SDSS/sdss_vac_1e12Msun.csv`
+(see `bin/data/SDSS/README.md`).
+
 ## The published cube
 
 SDSS DR17 value-added catalog "Cosmic web environmental densities from

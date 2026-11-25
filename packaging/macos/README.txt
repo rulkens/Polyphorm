@@ -78,9 +78,20 @@ Choose "Open my own dataset" and pick either:
 
 For a CSV, Polyphorm asks for a weight scale that multiplies the weight
 column. It matters: the simulation uses log10(1 + weight) divided by the
-mean weight. Use 1 to take the weights as they are. For the SDSS VAC
-input catalog (sample_3D_linW.csv, weights in 1e9 Msun) use 0.001 to
-reproduce the published run, which used 1e12 Msun.
+mean weight, so the unit of the weights changes the result. The bundled
+datasets all use stellar mass in 1e12 Msun. Use 1 to take the weights as
+they are; give a CSV in another unit the matching weight scale.
+
+The SDSS full catalog exists as two CSVs with the same rows:
+
+  File                    Unit        Weight scale
+  sdss_vac_1e12Msun.csv   1e12 Msun   1      (next to this README)
+  sample_3D_linW.csv      1e9 Msun    0.001  (the published file)
+
+sample_3D_linW.csv is the SDSS VAC input catalog as published, in the
+source repository under bin/data/reference/; use 0.001 with it to
+reproduce the published run, which used 1e12 Msun. The bundled 2MRS
+dataset is in 1e12 Msun since v1.2.1-alpha (1e9 Msun before).
 
 Packing a large CSV once makes it load faster. pack_catalog.py (next to
 this README) does that:
@@ -98,6 +109,7 @@ The app can also be run from Terminal, with the same flags as the source
 build:
 
   /Applications/Polyphorm.app/Contents/MacOS/Polyphorm --dataset mygalaxies --agents 2000000
+  /Applications/Polyphorm.app/Contents/MacOS/Polyphorm --dataset sdss_vac_1e12Msun.csv
   /Applications/Polyphorm.app/Contents/MacOS/Polyphorm --dataset sample_3D_linW.csv --weight-scale 0.001
   /Applications/Polyphorm.app/Contents/MacOS/Polyphorm --headless 1000 --export --dataset mygalaxies
 
